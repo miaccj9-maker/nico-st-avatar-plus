@@ -1,0 +1,12 @@
+{
+  "display_name": "ST Avatar Drag & Video",
+  "loading_order": 5,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "Nicole",
+  "version": "1.0.0",
+  "homePage": "",
+  "description": "酒馆头像无感自由拖拽平移与动态视频支持，自适应全画幅渲染，零黑边贴边。"
+}
