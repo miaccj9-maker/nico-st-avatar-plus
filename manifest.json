@@ -1,12 +1,12 @@
 {
-  "display_name": "ST Avatar Drag & Video",
-  "loading_order": 5,
-  "requires": [],
-  "optional": [],
-  "js": "index.js",
-  "css": "style.css",
-  "author": "Nicole",
-  "version": "1.0.0",
-  "homePage": "",
-  "description": "酒馆头像无感自由拖拽平移与动态视频支持，自适应全画幅渲染，零黑边贴边。"
+    "display_name": "ST Avatar Drag & Video",
+    "loading_order": 5,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "nico2",
+    "version": "1.4.0",
+    "homePage": "https://github.com/miaccj9-maker/nico-st-avatar-plus",
+    "description": "酒馆头像动态视频 + 双击编辑模式：默认锁定，双击才可拖动/缩放，彻底避免滑动聊天时误触；自适应全画幅渲染，零黑边贴边，分存档隔离。"
 }
