@@ -22,7 +22,12 @@
     const SCALE_STEP = 0.15;
 
     /* ========== 会话 / 存档感知系统 ========== */
-    function getChatId() {
+    /* 记录最近一次成功解析到的存档 id：扩展启动早期读不到存档，
+       以前会退成 global_chat，导致读出来的位移和拖动时存下的位移不是同一个键，
+       表现就是"新消息一来头像位置就跳回去"。这里改成沿用上一次真实 id。 */
+    let lastGoodChatId = '';
+
+    function resolveChatId() {
         try {
             if (window.SillyTavern?.getContext) {
                 const ctx = window.SillyTavern.getContext();
@@ -42,7 +47,16 @@
         if (activeItem && activeItem.getAttribute('data-id')) {
             return String(activeItem.getAttribute('data-id'));
         }
-        return 'global_chat';
+        return '';
+    }
+
+    function getChatId() {
+        const got = resolveChatId();
+        if (got) {
+            lastGoodChatId = got;
+            return got;
+        }
+        return lastGoodChatId || 'global_chat';
     }
 
     function makeKey(charName) {
@@ -532,19 +546,30 @@ button:active { opacity: .8; }
                 el.style.backgroundSize = `${bgW}% auto`;
                 el.style.backgroundPosition = `calc(50% + ${pos.x}px) calc(50% + ${pos.y}px)`;
             } else {
+                /* 关键：放大不用 transform: scale()。
+                   transform 缩放是把已经栅格化好的位图再拉伸，放得越大越糊；
+                   这里直接把元素宽高按"渲染尺寸 × 缩放"算成整数像素，
+                   浏览器每次都是按最终尺寸重新采样原图，放大后依然是原图分辨率。 */
+                const drawW = Math.max(1, Math.round(renderW * s));
+                const drawH = Math.max(1, Math.round(renderH * s));
+                const offX = Math.round(pos.x);
+                const offY = Math.round(pos.y);
+
                 el.style.position = 'absolute';
                 el.style.left = '50%';
                 el.style.top = '50%';
-                el.style.width = `${renderW}px`;
-                el.style.height = `${renderH}px`;
-                el.style.minWidth = `${renderW}px`;
-                el.style.minHeight = `${renderH}px`;
+                el.style.width = `${drawW}px`;
+                el.style.height = `${drawH}px`;
+                el.style.minWidth = `${drawW}px`;
+                el.style.minHeight = `${drawH}px`;
                 el.style.maxWidth = 'none';
                 el.style.maxHeight = 'none';
                 el.style.objectFit = 'cover';
+                el.style.objectPosition = 'center center';
                 el.style.display = 'block';
                 el.style.transformOrigin = 'center center';
-                el.style.transform = `translate3d(calc(-50% + ${pos.x}px), calc(-50% + ${pos.y}px), 0px) scale(${scale})`;
+                /* 只做整数像素位移，避免半像素重采样带来的糊边 */
+                el.style.transform = `translate3d(calc(-50% + ${offX}px), calc(-50% + ${offY}px), 0px)`;
             }
         };
 
@@ -573,14 +598,17 @@ button:active { opacity: .8; }
             });
         };
 
+        const reapply = () => {
+            try { el.__applyStoredTransform(); } catch (e) { /* 元素已移除 */ }
+        };
+
         if (el.tagName === 'IMG') {
-            if (!el.complete) {
-                el.addEventListener('load', () => el.__applyStoredTransform(), { once: true });
-            }
+            // 每次加载完成都重算：酒馆重新渲染头像 / 换了图源后，尺寸会变
+            el.addEventListener('load', reapply);
+            el.addEventListener('error', reapply);
         } else if (el.tagName === 'VIDEO') {
-            if (el.readyState < 1) {
-                el.addEventListener('loadedmetadata', () => el.__applyStoredTransform(), { once: true });
-            }
+            el.addEventListener('loadedmetadata', reapply);
+            el.addEventListener('loadeddata', reapply);
         }
 
         el.__applyStoredTransform();
@@ -930,20 +958,61 @@ button:active { opacity: .8; }
         applyAvatar(mes);
     }
 
-    function initAll() {
-        if (unlockedEl && !unlockedEl.isConnected) unlockedEl = null;
-        document.querySelectorAll('#chat .mes').forEach(mountMessage);
+    /* 带自定义 UI 的酒馆在插楼 / 重新渲染时会把头像元素整个换掉：
+       新元素既没有绑定、也没有内联尺寸，于是又回到主题默认的居中裁切，
+       看起来就像"位置被打回原样"。这里做一次防抖巡检，按已存位移重新挂回去。 */
+    let sweepTimer = 0;
+
+    function sweepAvatars() {
+        sweepTimer = 0;
+        const chat = document.getElementById('chat');
+        if (!chat) return;
+        chat.querySelectorAll('.mes').forEach((mes) => {
+            const t = findAvatar(mes);
+            if (!t || !t.el) return;
+            if (!t.el.dataset.dragReady || typeof t.el.__applyStoredTransform !== 'function') {
+                mountMessage(mes);   // 元素被换过：重新绑定 + 按存档位置重绘
+                return;
+            }
+            // 元素还在，但内联尺寸被外部样式或重渲染冲掉了
+            if (!t.el.style.width || t.el.style.width === 'auto') {
+                t.el.__setChar(getCharName(mes));
+            }
+        });
     }
+
+    function scheduleSweep() {
+        if (sweepTimer) return;
+        sweepTimer = setTimeout(sweepAvatars, 250);
+    }
+
+    const isAvatarish = (node) => {
+        if (!node || node.nodeType !== 1) return false;
+        if (node.matches?.('img, video, .avatar, .mesAvatarWrapper')) return true;
+        return !!node.querySelector?.('img, video, .avatar');
+    };
 
     const observer = new MutationObserver((muts) => {
         for (const m of muts) {
+            if (m.target && m.target.nodeType === 1 && m.target.closest?.('.avatar')) {
+                scheduleSweep();
+            }
             m.addedNodes.forEach((node) => {
                 if (node.nodeType !== 1) return;
                 const targets = node.classList?.contains('mes') ? [node] : (node.querySelectorAll?.('.mes') || []);
                 targets.forEach(mountMessage);
+                if (isAvatarish(node)) scheduleSweep();
+            });
+            m.removedNodes.forEach((node) => {
+                if (isAvatarish(node)) scheduleSweep();
             });
         }
     });
+
+    function initAll() {
+        if (unlockedEl && !unlockedEl.isConnected) unlockedEl = null;
+        document.querySelectorAll('#chat .mes').forEach(mountMessage);
+    }
 
     function observeChat() {
         const chat = document.getElementById('chat');
@@ -997,7 +1066,10 @@ button:active { opacity: .8; }
         bindUnlockGuards();
         boot();
         bindStEvents();
-        console.log('%c[ST Avatar+] 1.4.0 双击编辑版就绪', 'color:#4a90e2;font-weight:bold');
+        // 窗口尺寸变化后头像框尺寸也会变，重新按存档位移重绘一次
+        window.addEventListener('resize', scheduleSweep);
+        window.addEventListener('load', scheduleSweep, { once: true });
+        console.log('%c[ST Avatar+] 1.5.0 原生头像可拖 + 高清重绘就绪', 'color:#4a90e2;font-weight:bold');
     }
 
     if (document.readyState === 'loading') {
