@@ -4,8 +4,8 @@
  *
  * 由 Tampermonkey 用户脚本移植为酒馆第三方扩展。
  * v1.4.0：改为双击进入拖动模式，默认锁定，杜绝误触。
- * 数据仍写在同一浏览器的 localStorage / IndexedDB，
- * 与旧用户脚本的数据可以直接互通。
+ * v1.5.0：原生头像同引擎 + 按最终像素重绘（放大不糊）+ 重渲染巡检。
+ * v1.6.0：面具/存档完全独立 + 本地缓存 + 新楼层不再闪原始头像。
  * ============================================================ */
 (function () {
     'use strict';
@@ -20,6 +20,13 @@
     const MIN_SCALE = 1.0;
     const MAX_SCALE = 4.5;
     const SCALE_STEP = 0.15;
+
+    /* ========== 内存缓存 ==========
+     * 避免每条消息挂载都重复查 IndexedDB / 重复解析 localStorage。
+     * 保存 / 切换存档时会主动失效。 */
+    const mediaCache = new Map();   // key -> { src, isLocal, type } | null
+    const posCache = new Map();     // key -> { x, y }
+    const scaleCache = new Map();   // key -> number
 
     /* ========== 会话 / 存档感知系统 ========== */
     /* 记录最近一次成功解析到的存档 id：扩展启动早期读不到存档，
@@ -59,8 +66,13 @@
         return lastGoodChatId || 'global_chat';
     }
 
-    function makeKey(charName) {
-        return `${getChatId()}::${charName}`;
+    /* 独立面具（persona / 角色）+ 独立存档（chat）：
+     * 键 = chatId::(u=user面具 / c=角色)::名字。
+     * 这样即使两个存档里出现同名角色、或同一角色在不同面具下，
+     * 位移 / 缩放 / 自定义头像也完全不会串。 */
+    function makeKey(charName, isUser) {
+        const prefix = isUser ? 'u' : 'c';
+        return `${getChatId()}::${prefix}::${charName}`;
     }
 
     /* ========== 1. IndexedDB 异步二进制存储 ========== */
@@ -147,66 +159,92 @@
     };
     const save = (k, d) => localStorage.setItem(k, JSON.stringify(d));
 
-    const getVideoUrl = (charName) => {
+    /* 新键带 u/c 前缀；读时回退到旧键（v1.5 及更早），避免老设置丢失 */
+    function storageKeys(charName, isUser) {
+        const newK = makeKey(charName, isUser);
+        const oldK = `${getChatId()}::${charName}`;
+        return [newK, oldK];
+    }
+
+    const getVideoUrl = (charName, isUser) => {
         const store = load(VIDEO_KEY);
-        const k = makeKey(charName);
-        return store[k] || store[charName] || '';
+        const [k, oldK] = storageKeys(charName, isUser);
+        return store[k] || store[oldK] || store[charName] || '';
     };
 
-    const setVideoUrl = (charName, url) => {
+    const setVideoUrl = (charName, url, isUser) => {
         const d = load(VIDEO_KEY);
-        const k = makeKey(charName);
+        const k = makeKey(charName, isUser);
         if (url) d[k] = url;
         else delete d[k];
         save(VIDEO_KEY, d);
+        mediaCache.delete(k);
     };
 
-    const getPos = (charName) => {
+    const getPos = (charName, isUser) => {
+        const [k, oldK] = storageKeys(charName, isUser);
+        if (posCache.has(k)) return posCache.get(k);
         const store = load(POS_KEY);
-        const k = makeKey(charName);
-        const p = store[k] || store[charName];
-        return p ? { x: Number(p.x) || 0, y: Number(p.y) || 0 } : { x: 0, y: 0 };
+        const p = store[k] || store[oldK] || store[charName];
+        const val = p ? { x: Number(p.x) || 0, y: Number(p.y) || 0 } : { x: 0, y: 0 };
+        posCache.set(k, val);
+        return val;
     };
 
-    const setPos = (charName, x, y) => {
+    const setPos = (charName, x, y, isUser) => {
         const d = load(POS_KEY);
-        const k = makeKey(charName);
+        const k = makeKey(charName, isUser);
         d[k] = { x, y };
         save(POS_KEY, d);
+        posCache.set(k, { x, y });
     };
 
-    const getScale = (charName) => {
+    const getScale = (charName, isUser) => {
+        const [k, oldK] = storageKeys(charName, isUser);
+        if (scaleCache.has(k)) return scaleCache.get(k);
         const store = load(SCALE_KEY);
-        const k = makeKey(charName);
-        return Number(store[k] || store[charName]) || 1.0;
+        const val = Number(store[k] || store[oldK] || store[charName]) || 1.0;
+        scaleCache.set(k, val);
+        return val;
     };
 
-    const setScale = (charName, s) => {
+    const setScale = (charName, s, isUser) => {
         const d = load(SCALE_KEY);
-        const k = makeKey(charName);
+        const k = makeKey(charName, isUser);
         if (s && s > MIN_SCALE) d[k] = s;
         else delete d[k];
         save(SCALE_KEY, d);
+        scaleCache.set(k, s || 1.0);
     };
+
+    /* 切换存档 / 换角色时清空内存缓存，避免串档 */
+    function clearAllCaches() {
+        mediaCache.clear();
+        posCache.clear();
+        scaleCache.clear();
+    }
 
     const activeBlobUrls = new Map();
 
-    async function resolveAvatarSource(charName) {
-        const k = makeKey(charName);
+    async function resolveAvatarSource(charName, isUser) {
+        const k = makeKey(charName, isUser);
+        /* 内存缓存命中：同步返回，不再等 IndexedDB，避免新楼层闪一下 */
+        if (mediaCache.has(k)) return mediaCache.get(k);
         const localBlob = await getLocalFile(k, charName);
+        let result = null;
         if (localBlob) {
             if (activeBlobUrls.has(k)) {
                 URL.revokeObjectURL(activeBlobUrls.get(k));
             }
             const blobUrl = URL.createObjectURL(localBlob);
             activeBlobUrls.set(k, blobUrl);
-            return { src: blobUrl, isLocal: true, type: localBlob.type };
+            result = { src: blobUrl, isLocal: true, type: localBlob.type };
+        } else {
+            const netUrl = getVideoUrl(charName, isUser);
+            if (netUrl) result = { src: netUrl, isLocal: false, type: '' };
         }
-        const netUrl = getVideoUrl(charName);
-        if (netUrl) {
-            return { src: netUrl, isLocal: false, type: '' };
-        }
-        return null;
+        mediaCache.set(k, result);
+        return result;
     }
 
     /* ========== 3. 工具函数 ========== */
@@ -217,6 +255,13 @@
             || mes.querySelector('.ch_name')?.textContent?.trim()
             || mes.querySelector('.mesAvatarWrapper')?.getAttribute('ch_name')
             || 'default';
+    }
+
+    /* 判断这条消息是不是用户（面具）发的，用于独立存档键 */
+    function isUserMessage(mes) {
+        return mes.classList.contains('is_user')
+            || mes.getAttribute('is_user') === 'true'
+            || mes.getAttribute('isUser') === 'true';
     }
 
     function findAvatar(mes) {
@@ -363,15 +408,17 @@ button:active { opacity: .8; }
 
         resetBtn.addEventListener('click', async () => {
             const name = modalHost.dataset.charName;
-            const k = makeKey(name);
-            setPos(name, 0, 0);
-            setScale(name, MIN_SCALE);
-            setVideoUrl(name, '');
+            const isUser = modalHost.dataset.isUser === '1';
+            const k = makeKey(name, isUser);
+            setPos(name, 0, 0, isUser);
+            setScale(name, MIN_SCALE, isUser);
+            setVideoUrl(name, '', isUser);
             await deleteLocalFile(k);
             if (activeBlobUrls.has(k)) {
                 URL.revokeObjectURL(activeBlobUrls.get(k));
                 activeBlobUrls.delete(k);
             }
+            clearAllCaches();
             initAll();
             close({ reset: true });
         });
@@ -380,21 +427,22 @@ button:active { opacity: .8; }
 
         okBtn.addEventListener('click', async () => {
             const name = modalHost.dataset.charName;
-            const k = makeKey(name);
+            const isUser = modalHost.dataset.isUser === '1';
+            const k = makeKey(name, isUser);
             const textUrl = input.value.trim();
 
             if (pendingFileBlob) {
                 await saveLocalFile(k, pendingFileBlob);
-                setVideoUrl(name, '');
+                setVideoUrl(name, '', isUser);
             } else {
                 await deleteLocalFile(k);
                 if (activeBlobUrls.has(k)) {
                     URL.revokeObjectURL(activeBlobUrls.get(k));
                     activeBlobUrls.delete(k);
                 }
-                setVideoUrl(name, textUrl);
+                setVideoUrl(name, textUrl, isUser);
             }
-
+            clearAllCaches();
             initAll();
             close({ ok: true });
         });
@@ -412,13 +460,14 @@ button:active { opacity: .8; }
         return modalHost;
     }
 
-    async function openVideoModal(charName) {
+    async function openVideoModal(charName, isUser) {
         ensureModal();
         const shadow = modalHost.shadowRoot;
         modalHost.dataset.charName = charName;
-        const k = makeKey(charName);
-        shadow.getElementById('title').textContent = `【${charName}】头像设置 (当前会话)`;
-        shadow.getElementById('input').value = getVideoUrl(charName);
+        modalHost.dataset.isUser = isUser ? '1' : '';
+        const k = makeKey(charName, !!isUser);
+        shadow.getElementById('title').textContent = `【${charName}】头像设置 (${isUser ? '面具' : '角色'}·当前存档)`;
+        shadow.getElementById('input').value = getVideoUrl(charName, !!isUser);
         pendingFileBlob = null;
 
         const hasLocal = await getLocalFile(k, charName);
@@ -464,7 +513,7 @@ button:active { opacity: .8; }
         });
     }
 
-    function setupDrag(target, charName) {
+    function setupDrag(target, charName, isUser) {
         const el = target.el;
         const mode = target.mode;
         const container = target.container;
@@ -477,10 +526,11 @@ button:active { opacity: .8; }
             }
         }
 
-        // 角色名可能随存档切换而变化，用可变值，避免重复绑定事件
+        // 角色名 / 面具类型可能随存档切换而变化，用可变值，避免重复绑定事件
         let charNameNow = charName;
-        let pos = getPos(charNameNow);
-        let scale = Math.max(MIN_SCALE, getScale(charNameNow));
+        let isUserNow = !!isUser;
+        let pos = getPos(charNameNow, isUserNow);
+        let scale = Math.max(MIN_SCALE, getScale(charNameNow, isUserNow));
         let raf = 0;
 
         const getMediaIntrinsicSize = () => {
@@ -574,14 +624,15 @@ button:active { opacity: .8; }
         };
 
         el.__applyStoredTransform = () => {
-            pos = getPos(charNameNow);
-            scale = Math.max(MIN_SCALE, getScale(charNameNow));
+            pos = getPos(charNameNow, isUserNow);
+            scale = Math.max(MIN_SCALE, getScale(charNameNow, isUserNow));
             applyTransform(pos.x, pos.y, scale);
         };
 
         // 存档 / 角色切换时复用同一套事件绑定，只更新角色名与位移
-        el.__setChar = (name) => {
+        el.__setChar = (name, isUser) => {
             charNameNow = name;
+            if (typeof isUser === 'boolean') isUserNow = isUser;
             el.__applyStoredTransform();
         };
 
@@ -667,7 +718,7 @@ button:active { opacity: .8; }
             const step = e.deltaY < 0 ? SCALE_STEP : -SCALE_STEP;
             const newScale = clampVal(Math.round((scale + step) * 100) / 100, MIN_SCALE, MAX_SCALE);
             schedule(pos.x, pos.y, newScale);
-            setScale(charNameNow, newScale);
+            setScale(charNameNow, newScale, isUserNow);
         }, { passive: false });
 
         /* 桌面端：鼠标平移（锁定时完全不响应，避免误触拖走头像） */
@@ -709,7 +760,7 @@ button:active { opacity: .8; }
             }
             const safe = clampSafePosition(pos.x, pos.y, scale);
             applyTransform(safe.x, safe.y, scale); // 补一帧，避免极快拖动时画面没跟上
-            setPos(charNameNow, safe.x, safe.y);
+            setPos(charNameNow, safe.x, safe.y, isUserNow);
         };
 
         el.addEventListener('mousedown', mDown);
@@ -825,7 +876,7 @@ button:active { opacity: .8; }
 
             if (tPinch && e.touches.length < 2) {
                 tPinch = false;
-                setScale(charNameNow, scale);
+                setScale(charNameNow, scale, isUserNow);
             }
 
             if (e.touches.length === 0) {
@@ -845,7 +896,7 @@ button:active { opacity: .8; }
                     }
                     const safe = clampSafePosition(pos.x, pos.y, scale);
                     applyTransform(safe.x, safe.y, scale);
-                    setPos(charNameNow, safe.x, safe.y);
+                    setPos(charNameNow, safe.x, safe.y, isUserNow);
                     return;
                 }
 
@@ -872,7 +923,7 @@ button:active { opacity: .8; }
             e.stopPropagation();
             const isLongPress = tActive;
             if (isLongPress) tConsumed = true;
-            openVideoModal(charNameNow);
+            openVideoModal(charNameNow, isUserNow);
         });
     }
 
@@ -883,7 +934,7 @@ button:active { opacity: .8; }
         return /\.(mp4|webm)($|\?)/i.test(info.src);
     };
 
-    async function applyAvatar(mes) {
+    async function applyAvatar(mes, isUser) {
         if (!mes) return;
         const charName = getCharName(mes);
         const t = findAvatar(mes);
@@ -892,7 +943,7 @@ button:active { opacity: .8; }
         const container = t.container;
         if (!container) return;
 
-        const mediaSource = await resolveAvatarSource(charName);
+        const mediaSource = await resolveAvatarSource(charName, !!isUser);
         const existingImg = container.querySelector('img');
         const existingVideo = container.querySelector('video');
 
@@ -911,7 +962,7 @@ button:active { opacity: .8; }
                     video.className = existingImg.className;
                     video.style.cssText = existingImg.style.cssText;
                     container.replaceChild(video, existingImg);
-                    setupDrag({ el: video, mode: 'object', container }, charName);
+                    setupDrag({ el: video, mode: 'object', container }, charName, !!isUser);
                     video.play().catch(() => { });
                 } else if (existingVideo && existingVideo.src !== mediaSource.src) {
                     existingVideo.src = mediaSource.src;
@@ -925,7 +976,7 @@ button:active { opacity: .8; }
                     img.style.cssText = existingVideo.style.cssText;
                     img.src = mediaSource.src;
                     container.replaceChild(img, existingVideo);
-                    setupDrag({ el: img, mode: 'object', container }, charName);
+                    setupDrag({ el: img, mode: 'object', container }, charName, !!isUser);
                 } else if (existingImg) {
                     if (!container.dataset.origSrc) container.dataset.origSrc = existingImg.src;
                     if (existingImg.src !== mediaSource.src) existingImg.src = mediaSource.src;
@@ -937,7 +988,7 @@ button:active { opacity: .8; }
             img.style.cssText = existingVideo.style.cssText;
             img.src = container.dataset.origSrc || existingVideo.getAttribute('data-orig-src') || '';
             container.replaceChild(img, existingVideo);
-            setupDrag({ el: img, mode: 'object', container }, charName);
+            setupDrag({ el: img, mode: 'object', container }, charName, !!isUser);
         } else if (existingImg && container.dataset.origSrc) {
             existingImg.src = container.dataset.origSrc;
             delete container.dataset.origSrc;
@@ -945,17 +996,21 @@ button:active { opacity: .8; }
     }
 
     /* ========== 7. 批量挂载与监听 ========== */
-    /** 挂载头像：已挂过的元素只更新角色名与位移，不重复绑定事件 */
+    /** 挂载头像：已挂过的元素只更新角色名与位移，不重复绑定事件。
+     *  关键：位移/缩放是同步从 localStorage 读的，必须在同一调用栈里写进内联样式，
+     *  不能等 applyAvatar 的异步 IndexedDB 回来——否则新楼层会先闪一帧原生头像。 */
     function mountMessage(mes) {
         const name = getCharName(mes);
+        const isUser = isUserMessage(mes);
         const t = findAvatar(mes);
         if (!t) return;
         if (t.el.dataset.dragReady && typeof t.el.__setChar === 'function') {
-            t.el.__setChar(name);
+            t.el.__setChar(name, isUser);
         } else {
-            setupDrag(t, name);
+            setupDrag(t, name, isUser);
         }
-        applyAvatar(mes);
+        /* 异步替换自定义头像源（视频/图片），不阻塞上面的同步位移 */
+        applyAvatar(mes, isUser);
     }
 
     /* 带自定义 UI 的酒馆在插楼 / 重新渲染时会把头像元素整个换掉：
@@ -976,7 +1031,7 @@ button:active { opacity: .8; }
             }
             // 元素还在，但内联尺寸被外部样式或重渲染冲掉了
             if (!t.el.style.width || t.el.style.width === 'auto') {
-                t.el.__setChar(getCharName(mes));
+                t.el.__setChar(getCharName(mes), isUserMessage(mes));
             }
         });
     }
@@ -1048,13 +1103,15 @@ button:active { opacity: .8; }
                 eventSource.on(type, handler);
             };
 
-            onEvent('APP_READY', () => boot());
+            onEvent('APP_READY', () => { clearAllCaches(); boot(); });
             onEvent('CHAT_CHANGED', () => {
                 lockAvatarEdit();
+                clearAllCaches();   // 换存档后旧缓存必须失效，否则串档
                 initAll();
             });
             onEvent('CHARACTER_SELECTED', () => {
                 lockAvatarEdit();
+                clearAllCaches();   // 换角色后清缓存
                 initAll();
             });
         } catch (e) {
@@ -1069,7 +1126,7 @@ button:active { opacity: .8; }
         // 窗口尺寸变化后头像框尺寸也会变，重新按存档位移重绘一次
         window.addEventListener('resize', scheduleSweep);
         window.addEventListener('load', scheduleSweep, { once: true });
-        console.log('%c[ST Avatar+] 1.5.0 原生头像可拖 + 高清重绘就绪', 'color:#4a90e2;font-weight:bold');
+        console.log('%c[ST Avatar+] 1.6.0 面具/存档独立 + 本地缓存 + 新楼层零闪烁', 'color:#4a90e2;font-weight:bold');
     }
 
     if (document.readyState === 'loading') {
@@ -1080,13 +1137,15 @@ button:active { opacity: .8; }
 
     /* ========== 9. 对外接口 ========== */
     window.STAvatar = {
-        setVideo: (charName, url) => {
-            setVideoUrl(charName, url);
+        setVideo: (charName, url, isUser) => {
+            setVideoUrl(charName, url, !!isUser);
+            clearAllCaches();
             initAll();
         },
-        resetPos: (charName) => {
-            setPos(charName, 0, 0);
-            setScale(charName, MIN_SCALE);
+        resetPos: (charName, isUser) => {
+            setPos(charName, 0, 0, !!isUser);
+            setScale(charName, MIN_SCALE, !!isUser);
+            clearAllCaches();
             initAll();
         },
         listVideos: () => load(VIDEO_KEY),
