@@ -6,7 +6,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "nico2",
-    "version": "1.6.0",
+    "version": "1.6.1",
     "homePage": "https://github.com/miaccj9-maker/nico-st-avatar-plus",
     "description": "酒馆头像动态视频 + 双击编辑模式：默认锁定，双击才可拖动/缩放；面具（角色/用户）与存档完全独立不混用；新楼层零闪烁；本地缓存避免重复查询。"
 }

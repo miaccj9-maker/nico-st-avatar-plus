@@ -303,79 +303,108 @@
 .overlay {
     position: absolute; inset: 0;
     display: flex; align-items: center; justify-content: center;
-    background: rgba(0,0,0,.5);
+    background: rgba(0,0,0,.45);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
     padding: 20px; pointer-events: auto;
+    animation: fadeIn .18s ease-out;
 }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slideUp { from { opacity: 0; transform: translateY(12px) scale(.97); } to { opacity: 1; transform: none; } }
 .card {
-    width: min(92vw, 420px); max-height: 88vh; overflow-y: auto;
-    background: #1e1f26;
-    border: 1px solid #3a3b45;
-    border-radius: 12px;
-    padding: 16px;
-    color: #e6e6e6;
-    box-shadow: 0 10px 30px rgba(0,0,0,.5);
+    width: min(92vw, 380px); max-height: 86vh; overflow-y: auto;
+    background: rgba(28,29,36,.92);
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 16px;
+    padding: 22px;
+    color: #f0f0f2;
+    box-shadow: 0 20px 60px rgba(0,0,0,.4);
+    animation: slideUp .22s cubic-bezier(.2,.8,.2,1);
 }
-.title { font-size: 15px; font-weight: 600; color: #e6e6e6; margin-bottom: 12px; }
-.input-row { display: flex; gap: 8px; margin-bottom: 6px; }
+.head { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; }
+.badge {
+    font-size: 10px; font-weight: 600; letter-spacing: .5px;
+    padding: 2px 8px; border-radius: 6px; text-transform: uppercase;
+}
+.badge.persona { background: rgba(16,185,129,.15); color: #34d399; }
+.badge.char    { background: rgba(74,144,226,.15); color: #60a5fa; }
+.title { font-size: 16px; font-weight: 600; color: #f0f0f2; }
+.input-row { display: flex; gap: 8px; margin-bottom: 8px; }
 input[type=url] {
-    flex: 1; padding: 10px 12px; border-radius: 8px;
-    border: 1px solid #3a3b45; background: #14151b; color: #fff;
-    font-size: 14px; outline: none;
+    flex: 1; padding: 11px 14px; border-radius: 10px;
+    border: 1px solid rgba(255,255,255,.1); background: rgba(0,0,0,.25); color: #fff;
+    font-size: 14px; outline: none; transition: border-color .15s;
 }
-input[type=url]:focus { border-color: #4a90e2; }
+input[type=url]:focus { border-color: rgba(74,144,226,.6); }
+input[type=url]::placeholder { color: rgba(255,255,255,.3); }
 .file-btn {
-    padding: 0 12px; background: #2f303b; border: 1px solid #4a4b57;
-    border-radius: 8px; color: #e2e8f0; font-size: 13px; font-weight: 500;
+    padding: 0 14px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1);
+    border-radius: 10px; color: #e2e8f0; font-size: 13px; font-weight: 500;
     cursor: pointer; display: flex; align-items: center; justify-content: center;
     white-space: nowrap; -webkit-tap-highlight-color: transparent;
+    transition: background .15s;
 }
-.file-btn:hover { background: #3b3c4a; }
+.file-btn:hover { background: rgba(255,255,255,.12); }
 .file-btn svg { width: 14px; height: 14px; margin-right: 6px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.status-tip { font-size: 12px; color: #10b981; margin-bottom: 6px; display: none; }
-.hint { margin-top: 6px; font-size: 12px; color: #9a9aa5; line-height: 1.4; }
-.btns { display: flex; gap: 8px; margin-top: 14px; }
+.status-tip { font-size: 12px; color: #34d399; margin: 6px 0 2px; display: none; }
+.hint { margin-top: 12px; font-size: 11.5px; color: rgba(255,255,255,.35); line-height: 1.6; }
+.hint b { color: rgba(255,255,255,.55); font-weight: 500; }
+.btns { display: flex; gap: 8px; margin-top: 18px; }
 button {
-    border: none; border-radius: 8px; padding: 10px 0; cursor: pointer;
-    font-size: 14px; color: #fff; -webkit-tap-highlight-color: transparent;
+    border: none; border-radius: 10px; padding: 11px 0; cursor: pointer;
+    font-size: 14px; font-weight: 500; -webkit-tap-highlight-color: transparent;
+    transition: opacity .12s, background .12s;
 }
-button:active { opacity: .8; }
-.primary { flex: 1.6; background: #4a90e2; font-weight: 600; }
-.ghost   { flex: 1.2; background: #3a3b45; }
-.cancel  { flex: 1;   background: #2a2b33; color: #aaa; }
+button:active { opacity: .75; }
+.primary { flex: 1.5; background: #4a90e2; color: #fff; font-weight: 600; }
+.primary:hover { background: #3a7fd1; }
+.restore { flex: 1; background: rgba(255,255,255,.06); color: #f87171; border: 1px solid rgba(248,113,113,.25); }
+.restore:hover { background: rgba(248,113,113,.12); }
+.cancel { flex: .8; background: transparent; color: rgba(255,255,255,.4); }
+.cancel:hover { background: rgba(255,255,255,.06); }
+.divider { height: 1px; background: rgba(255,255,255,.06); margin: 14px 0 0; }
+.reset-pos {
+    display: block; width: 100%; text-align: center; margin-top: 10px;
+    font-size: 12px; color: rgba(255,255,255,.3); background: none;
+}
+.reset-pos:hover { color: rgba(255,255,255,.6); }
 </style>
 <div class="overlay">
     <div class="card">
-        <div class="title" id="title"></div>
+        <div class="head">
+            <span class="badge" id="badge"></span>
+            <div class="title" id="title"></div>
+        </div>
         <div class="input-row">
             <input id="input" type="url" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false"
-                   placeholder="网络链接 或 选择本地文件"/>
+                   placeholder="粘贴图片/视频链接"/>
             <button class="file-btn" id="uploadBtn">
                 <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
-                本地文件
+                本地上传
             </button>
             <input type="file" id="fileInput" accept="video/mp4,video/webm,image/gif,image/png,image/jpeg,image/webp" style="display:none;"/>
         </div>
         <div class="status-tip" id="statusTip"></div>
         <div class="hint">
-            • 当前设置仅绑定在当前聊天存档中生效，实现不同存档互不干扰<br>
-            • 双击头像进入拖动模式后，滚轮 / 双指捏合缩放，单指 / 鼠标平移<br>
-            • 再次双击、点空白处或按 Esc 退出；未进入模式时头像不会误触移动<br>
-            • 动态锁边算法：牢牢填满原生框，绝不脱框留黑
+            <b>双击头像</b>进入拖动 · 滚轮/双指缩放<br>
+            设置独立绑定当前角色与当前存档，互不干扰
         </div>
         <div class="btns">
-            <button class="ghost" id="reset">复位</button>
             <button class="cancel" id="cancel">取消</button>
-            <button class="primary" id="ok">确定</button>
+            <button class="restore" id="restore">恢复原生</button>
+            <button class="primary" id="ok">应用</button>
         </div>
+        <button class="reset-pos" id="reset">重置位置与缩放</button>
     </div>
 </div>`;
 
         const title = shadow.getElementById('title');
+        const badge = shadow.getElementById('badge');
         const input = shadow.getElementById('input');
         const uploadBtn = shadow.getElementById('uploadBtn');
         const fileInput = shadow.getElementById('fileInput');
         const statusTip = shadow.getElementById('statusTip');
-        const resetBtn = shadow.getElementById('reset');
+        const restoreBtn = shadow.getElementById('restore');
+        const resetPosBtn = shadow.getElementById('reset');
         const cancelBtn = shadow.getElementById('cancel');
         const okBtn = shadow.getElementById('ok');
         const overlay = shadow.querySelector('.overlay');
@@ -406,12 +435,11 @@ button:active { opacity: .8; }
             fileInput.value = '';
         });
 
-        resetBtn.addEventListener('click', async () => {
+        /* 恢复原生：清除自定义头像源（本地文件+URL），回到酒馆原生头像，保留位置/缩放 */
+        restoreBtn.addEventListener('click', async () => {
             const name = modalHost.dataset.charName;
             const isUser = modalHost.dataset.isUser === '1';
             const k = makeKey(name, isUser);
-            setPos(name, 0, 0, isUser);
-            setScale(name, MIN_SCALE, isUser);
             setVideoUrl(name, '', isUser);
             await deleteLocalFile(k);
             if (activeBlobUrls.has(k)) {
@@ -420,7 +448,18 @@ button:active { opacity: .8; }
             }
             clearAllCaches();
             initAll();
-            close({ reset: true });
+            close({ restore: true });
+        });
+
+        /* 重置位置与缩放：只清位移/缩放，不动自定义头像源 */
+        resetPosBtn.addEventListener('click', () => {
+            const name = modalHost.dataset.charName;
+            const isUser = modalHost.dataset.isUser === '1';
+            setPos(name, 0, 0, isUser);
+            setScale(name, MIN_SCALE, isUser);
+            clearAllCaches();
+            initAll();
+            close({ resetPos: true });
         });
 
         cancelBtn.addEventListener('click', () => close({ cancel: true }));
@@ -466,14 +505,17 @@ button:active { opacity: .8; }
         modalHost.dataset.charName = charName;
         modalHost.dataset.isUser = isUser ? '1' : '';
         const k = makeKey(charName, !!isUser);
-        shadow.getElementById('title').textContent = `【${charName}】头像设置 (${isUser ? '面具' : '角色'}·当前存档)`;
+        shadow.getElementById('title').textContent = charName;
+        const badge = shadow.getElementById('badge');
+        badge.textContent = isUser ? '面具' : '角色';
+        badge.className = 'badge ' + (isUser ? 'persona' : 'char');
         shadow.getElementById('input').value = getVideoUrl(charName, !!isUser);
         pendingFileBlob = null;
 
         const hasLocal = await getLocalFile(k, charName);
         const statusTip = shadow.getElementById('statusTip');
         if (hasLocal) {
-            statusTip.textContent = `当前使用本地存储 (${(hasLocal.size / (1024 * 1024)).toFixed(1)} MB)`;
+            statusTip.textContent = `本地文件 · ${(hasLocal.size / (1024 * 1024)).toFixed(1)} MB`;
             statusTip.style.display = 'block';
         } else {
             statusTip.style.display = 'none';
@@ -657,12 +699,21 @@ button:active { opacity: .8; }
             // 每次加载完成都重算：酒馆重新渲染头像 / 换了图源后，尺寸会变
             el.addEventListener('load', reapply);
             el.addEventListener('error', reapply);
+            /* 浏览器缓存命中时 load 事件可能在绑监听器之前就触发了，
+             * 这里补一帧：等布局稳定后再按存档位置重绘一次，
+             * 避免新楼层因容器尺寸还没算出来而用 60px 兜底、看起来像回到原位。 */
+            if (el.complete) {
+                requestAnimationFrame(reapply);
+            }
         } else if (el.tagName === 'VIDEO') {
             el.addEventListener('loadedmetadata', reapply);
             el.addEventListener('loadeddata', reapply);
+            requestAnimationFrame(reapply);
         }
 
         el.__applyStoredTransform();
+        /* 再补一帧：确保容器尺寸已布局完成（新插入的 DOM 节点第一帧 rect 可能为 0） */
+        requestAnimationFrame(reapply);
 
         /* ---------- 交互锁：默认锁定，双击才进入编辑模式，杜绝误触 ---------- */
         const DBL_TAP_MS = 320;
@@ -1126,7 +1177,7 @@ button:active { opacity: .8; }
         // 窗口尺寸变化后头像框尺寸也会变，重新按存档位移重绘一次
         window.addEventListener('resize', scheduleSweep);
         window.addEventListener('load', scheduleSweep, { once: true });
-        console.log('%c[ST Avatar+] 1.6.0 面具/存档独立 + 本地缓存 + 新楼层零闪烁', 'color:#4a90e2;font-weight:bold');
+        console.log('%c[ST Avatar+] 1.6.1 面具独立 · 恢复原生 · 高清无闪烁', 'color:#4a90e2;font-weight:bold');
     }
 
     if (document.readyState === 'loading') {

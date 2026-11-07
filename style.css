@@ -22,22 +22,3 @@
     object-fit: cover;
     display: block;
 }
-
-/* v1.6.0 防闪烁：
- * 新楼层刚插入 DOM 时，扩展 JS 还没跑（MutationObserver 是微任务），
- * 浏览器可能先按原生 img 尺寸画一帧。这里用 CSS 提前把头像
- * 绝对定位到容器中心、且不超出容器，避免"原始头像弹一下再变调节后位置"。 */
-#chat .mes .mesAvatarWrapper {
-    position: relative;
-    overflow: hidden;
-}
-#chat .mes .avatar img:not([style*="width"]),
-#chat .mes .avatar video:not([style*="width"]) {
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    max-width: none;
-    max-height: none;
-    transform: translate(-50%, -50%);
-    object-fit: cover;
-}
