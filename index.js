@@ -621,14 +621,23 @@ button:active { opacity: .75; }
             };
         };
 
-        const applyTransform = (x, y, s) => {
+        const applyTransform = (x, y, s, fromRestore) => {
             if (!container) return;
             const rect = container.getBoundingClientRect();
             const boxW = rect.width || container.offsetWidth || 60;
             const boxH = rect.height || container.offsetHeight || 60;
 
             const { renderW, renderH } = getRenderDimensions(boxW, boxH);
-            const safe = clampSafePosition(x, y, s);
+            let safe;
+            if (fromRestore) {
+                /* 恢复存档位置时不重新 clamp：
+                 * 新消息刚插入时图片可能还没加载完（naturalWidth=0），
+                 * 这时 clamp 会把已保存的位置错误归零。
+                 * 图片加载完成后的 reapply 会用真实尺寸再 clamp 一次。 */
+                safe = { x, y };
+            } else {
+                safe = clampSafePosition(x, y, s);
+            }
             pos.x = safe.x;
             pos.y = safe.y;
             scale = s;
@@ -668,7 +677,7 @@ button:active { opacity: .75; }
         el.__applyStoredTransform = () => {
             pos = getPos(charNameNow, isUserNow);
             scale = Math.max(MIN_SCALE, getScale(charNameNow, isUserNow));
-            applyTransform(pos.x, pos.y, scale);
+            applyTransform(pos.x, pos.y, scale, true);
         };
 
         // 存档 / 角色切换时复用同一套事件绑定，只更新角色名与位移
