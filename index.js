@@ -250,12 +250,29 @@
     /* ========== 3. 工具函数 ========== */
     const clampVal = (v, min, max) => Math.max(min, Math.min(max, v));
 
-    /* 从酒馆上下文拿到当前用户面具名（name1）。每个面具独立存储。 */
-    function getPersonaName() {
+    /* 每个面具的唯一标识：用面具在磁盘上的文件夹 ID（不是显示名，因为可能重名）。
+     * 优先从酒馆上下文读，其次从面具下拉框读。 */
+    function getPersonaId() {
         try {
             const ctx = window.SillyTavern?.getContext?.();
-            if (ctx?.name1) return String(ctx.name1).trim();
-            if (ctx?.userName) return String(ctx.userName).trim();
+            if (ctx) {
+                // 尝试多种已知的上下文字段
+                if (ctx.personaId) return String(ctx.personaId);
+                if (ctx.persona_id) return String(ctx.persona_id);
+                if (ctx.persona?.id) return String(ctx.persona.id);
+            }
+        } catch (e) {}
+        // 从面具选择下拉框读 value（通常是文件夹名/UUID）
+        try {
+            const sel = document.getElementById('persona_select')
+                || document.querySelector('select#persona_select')
+                || document.querySelector('#user_settings select[name="persona"]');
+            if (sel && sel.value) return 'sel_' + String(sel.value);
+        } catch (e) {}
+        // 最终兜底：用显示名（可能重名，但至少比没有强）
+        try {
+            const ctx = window.SillyTavern?.getContext?.();
+            if (ctx?.name1) return 'name_' + String(ctx.name1).trim();
         } catch (e) {}
         return 'default_persona';
     }
@@ -275,10 +292,10 @@
     }
 
     /* 统一入口：拿到这条消息对应的存储名。
-     * 用户面具用酒馆上下文里的真实面具名（name1），每个面具独立；
+     * 用户面具用唯一 ID（不依赖显示名，避免重名面具串档）；
      * 角色消息用 DOM 上的 ch_name。 */
     function getStoreName(mes) {
-        return isUserMessage(mes) ? getPersonaName() : getCharName(mes);
+        return isUserMessage(mes) ? getPersonaId() : getCharName(mes);
     }
 
     function findAvatar(mes) {
