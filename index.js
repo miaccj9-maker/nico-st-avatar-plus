@@ -250,8 +250,15 @@
     /* ========== 3. 工具函数 ========== */
     const clampVal = (v, min, max) => Math.max(min, Math.min(max, v));
 
-    /* 用户面具统一用固定标识，不依赖 DOM 上的 ch_name（不同主题/版本可能缺失或串成角色名） */
-    const PERSONA_KEY = '__persona__';
+    /* 从酒馆上下文拿到当前用户面具名（name1）。每个面具独立存储。 */
+    function getPersonaName() {
+        try {
+            const ctx = window.SillyTavern?.getContext?.();
+            if (ctx?.name1) return String(ctx.name1).trim();
+            if (ctx?.userName) return String(ctx.userName).trim();
+        } catch (e) {}
+        return 'default_persona';
+    }
 
     function getCharName(mes) {
         return mes.getAttribute('ch_name')
@@ -268,9 +275,10 @@
     }
 
     /* 统一入口：拿到这条消息对应的存储名。
-     * 用户面具永远用 PERSONA_KEY，不碰 ch_name，确保角色/面具绝不串档。 */
+     * 用户面具用酒馆上下文里的真实面具名（name1），每个面具独立；
+     * 角色消息用 DOM 上的 ch_name。 */
     function getStoreName(mes) {
-        return isUserMessage(mes) ? PERSONA_KEY : getCharName(mes);
+        return isUserMessage(mes) ? getPersonaName() : getCharName(mes);
     }
 
     function findAvatar(mes) {
