@@ -250,6 +250,9 @@
     /* ========== 3. 工具函数 ========== */
     const clampVal = (v, min, max) => Math.max(min, Math.min(max, v));
 
+    /* 用户面具统一用固定标识，不依赖 DOM 上的 ch_name（不同主题/版本可能缺失或串成角色名） */
+    const PERSONA_KEY = '__persona__';
+
     function getCharName(mes) {
         return mes.getAttribute('ch_name')
             || mes.querySelector('.ch_name')?.textContent?.trim()
@@ -262,6 +265,12 @@
         return mes.classList.contains('is_user')
             || mes.getAttribute('is_user') === 'true'
             || mes.getAttribute('isUser') === 'true';
+    }
+
+    /* 统一入口：拿到这条消息对应的存储名。
+     * 用户面具永远用 PERSONA_KEY，不碰 ch_name，确保角色/面具绝不串档。 */
+    function getStoreName(mes) {
+        return isUserMessage(mes) ? PERSONA_KEY : getCharName(mes);
     }
 
     function findAvatar(mes) {
@@ -505,7 +514,7 @@ button:active { opacity: .75; }
         modalHost.dataset.charName = charName;
         modalHost.dataset.isUser = isUser ? '1' : '';
         const k = makeKey(charName, !!isUser);
-        shadow.getElementById('title').textContent = charName;
+        shadow.getElementById('title').textContent = isUser ? '我的面具' : charName;
         const badge = shadow.getElementById('badge');
         badge.textContent = isUser ? '面具' : '角色';
         badge.className = 'badge ' + (isUser ? 'persona' : 'char');
@@ -996,7 +1005,7 @@ button:active { opacity: .75; }
 
     async function applyAvatar(mes, isUser) {
         if (!mes) return;
-        const charName = getCharName(mes);
+        const charName = getStoreName(mes);
         const t = findAvatar(mes);
         if (!t || t.mode !== 'object') return;
 
@@ -1060,8 +1069,8 @@ button:active { opacity: .75; }
      *  关键：位移/缩放是同步从 localStorage 读的，必须在同一调用栈里写进内联样式，
      *  不能等 applyAvatar 的异步 IndexedDB 回来——否则新楼层会先闪一帧原生头像。 */
     function mountMessage(mes) {
-        const name = getCharName(mes);
         const isUser = isUserMessage(mes);
+        const name = getStoreName(mes);
         const t = findAvatar(mes);
         if (!t) return;
         if (t.el.dataset.dragReady && typeof t.el.__setChar === 'function') {
@@ -1091,7 +1100,7 @@ button:active { opacity: .75; }
             }
             // 元素还在，但内联尺寸被外部样式或重渲染冲掉了
             if (!t.el.style.width || t.el.style.width === 'auto') {
-                t.el.__setChar(getCharName(mes), isUserMessage(mes));
+                t.el.__setChar(getStoreName(mes), isUserMessage(mes));
             }
         });
     }
