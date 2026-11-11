@@ -1,12 +1,12 @@
 {
-    "display_name": "ST Avatar Drag & Video",
+    "display_name": "ST Avatar+ · 裁剪 & 动态头像",
     "loading_order": 5,
     "requires": [],
     "optional": [],
     "js": "index.js",
     "css": "style.css",
     "author": "nico2",
-    "version": "1.6.1",
+    "version": "1.7.1",
     "homePage": "https://github.com/miaccj9-maker/nico-st-avatar-plus",
-    "description": "酒馆头像动态视频 + 双击编辑模式：默认锁定，双击才可拖动/缩放；面具（角色/用户）与存档完全独立不混用；新楼层零闪烁；本地缓存避免重复查询。"
+    "description": "头像自由拖动/缩放 + 动态视频头像 + 2:3 裁剪写入酒馆原生头像（侧栏、角色列表、手机端同步，不再两套头像）；点角色/面具头像即可选本机图片或视频；面具与存档按唯一 ID 独立；新楼层零回弹；恢复原生与重置位置分离。"
 }

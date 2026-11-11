@@ -1,16 +1,28 @@
 /* ============================================================
- * SillyTavern 扩展：头像拖拽 + 视频动态头像
- * （画幅自适应全览 + 零黑边锁边 + 分存档隔离）
+ * SillyTavern 扩展：头像裁剪 + 动态头像（合并版）
+ * nico-st-avatar-plus v1.7.1
  *
- * 由 Tampermonkey 用户脚本移植为酒馆第三方扩展。
- * v1.4.0：改为双击进入拖动模式，默认锁定，杜绝误触。
- * v1.5.0：原生头像同引擎 + 按最终像素重绘（放大不糊）+ 重渲染巡检。
- * v1.6.0：面具/存档完全独立 + 本地缓存 + 新楼层不再闪原始头像。
+ * v1.4.0 双击进入拖动模式，默认锁定，杜绝误触
+ * v1.5.0 原生头像同引擎 + 按最终像素重绘（放大不糊）+ 重渲染巡检
+ * v1.6.0 面具/存档完全独立 + 本地缓存 + 新楼层不再闪原始头像
+ * v1.7.0 ★ 合并 avatar-cropper：点角色/面具头像即可选本机图片或视频
+ *        ★ 图片按 2:3 裁剪后【写入酒馆原生头像】，不再出现"侧栏一套、聊天一套"
+ *        ★ 恢复存档位置时不再重新 clamp（修掉"位置被打回原位"的老毛病）
+ *        ★ "恢复原生头像"与"重置位置与缩放"分离
+ *        ★ 面板入口：角色界面头像、面具界面 Set Image 按钮
+ * v1.7.1 ★ 拖动不再丢帧（同帧多次移动取最新坐标；松手前 flush 最后一帧）
+ *        ★ 新楼层插入瞬间先摆好位移，避免"先闪原位置再跳"
+ *        ★ 面具唯一 ID 记住上次成功解析值，页面刚启动也不会错档
+ *        ★ 弹窗按钮基础样式补齐，底部 4 个按钮不再回到系统默认方块
+ *
+ * 存储键（不改名，兼容历史数据）：
+ *   st_avatar_video_urls / st_avatar_positions / st_avatar_scales
+ *   IndexedDB ST_Avatar_Local_DB v2 / store: avatar_files
  * ============================================================ */
 (function () {
     'use strict';
 
-    /* ========== 存储键名 ========== */
+    /* ========== 存储键名 / 常量 ========== */
     const VIDEO_KEY = 'st_avatar_video_urls';
     const POS_KEY = 'st_avatar_positions';
     const SCALE_KEY = 'st_avatar_scales';
@@ -21,17 +33,17 @@
     const MAX_SCALE = 4.5;
     const SCALE_STEP = 0.15;
 
-    /* ========== 内存缓存 ==========
-     * 避免每条消息挂载都重复查 IndexedDB / 重复解析 localStorage。
-     * 保存 / 切换存档时会主动失效。 */
+    /* 原生头像固定 2:3，输出不放大、上限 2048，保证放大后依旧清晰 */
+    const AV_H_PER_W = 1.5;
+    const AV_MAX_H = 2048;
+    const AV_MIN_H = 320;
+
+    /* ========== 内存缓存 ========== */
     const mediaCache = new Map();   // key -> { src, isLocal, type } | null
     const posCache = new Map();     // key -> { x, y }
     const scaleCache = new Map();   // key -> number
 
-    /* ========== 会话 / 存档感知系统 ========== */
-    /* 记录最近一次成功解析到的存档 id：扩展启动早期读不到存档，
-       以前会退成 global_chat，导致读出来的位移和拖动时存下的位移不是同一个键，
-       表现就是"新消息一来头像位置就跳回去"。这里改成沿用上一次真实 id。 */
+    /* ========== 会话 / 存档感知 ========== */
     let lastGoodChatId = '';
 
     function resolveChatId() {
@@ -43,13 +55,9 @@
                     return `${ctx.characterId}_${ctx.chatId}`;
                 }
             }
-        } catch (e) {
-            /* 忽略上下文读取失败，退回 DOM 探测 */
-        }
+        } catch (e) { /* 忽略上下文读取失败，退回 DOM 探测 */ }
         const chatSelect = document.getElementById('selected_chat');
-        if (chatSelect && chatSelect.value) {
-            return String(chatSelect.value);
-        }
+        if (chatSelect && chatSelect.value) return String(chatSelect.value);
         const activeItem = document.querySelector('#chat_history .chat_history_item.active');
         if (activeItem && activeItem.getAttribute('data-id')) {
             return String(activeItem.getAttribute('data-id'));
@@ -67,12 +75,9 @@
     }
 
     /* 独立面具（persona / 角色）+ 独立存档（chat）：
-     * 键 = chatId::(u=user面具 / c=角色)::名字。
-     * 这样即使两个存档里出现同名角色、或同一角色在不同面具下，
-     * 位移 / 缩放 / 自定义头像也完全不会串。 */
-    function makeKey(charName, isUser) {
-        const prefix = isUser ? 'u' : 'c';
-        return `${getChatId()}::${prefix}::${charName}`;
+       键 = chatId::(u=用户面具 / c=角色)::名字。 */
+    function makeKey(name, isUser) {
+        return `${getChatId()}::${isUser ? 'u' : 'c'}::${name}`;
     }
 
     /* ========== 1. IndexedDB 异步二进制存储 ========== */
@@ -84,9 +89,7 @@
                 const req = indexedDB.open(DB_NAME, 2);
                 req.onupgradeneeded = (e) => {
                     const db = e.target.result;
-                    if (!db.objectStoreNames.contains(DB_STORE)) {
-                        db.createObjectStore(DB_STORE);
-                    }
+                    if (!db.objectStoreNames.contains(DB_STORE)) db.createObjectStore(DB_STORE);
                 };
                 req.onsuccess = () => resolve(req.result);
                 req.onerror = () => reject(req.error);
@@ -151,66 +154,62 @@
 
     /* ========== 2. 状态读写 ========== */
     const load = (k) => {
-        try {
-            return JSON.parse(localStorage.getItem(k) || '{}');
-        } catch (e) {
-            return {};
-        }
+        try { return JSON.parse(localStorage.getItem(k) || '{}'); } catch (e) { return {}; }
     };
-    const save = (k, d) => localStorage.setItem(k, JSON.stringify(d));
+    const save = (k, d) => {
+        try { localStorage.setItem(k, JSON.stringify(d)); } catch (e) { /* 配额满了就别拦着用户 */ }
+    };
 
     /* 新键带 u/c 前缀；读时回退到旧键（v1.5 及更早），避免老设置丢失 */
-    function storageKeys(charName, isUser) {
-        const newK = makeKey(charName, isUser);
-        const oldK = `${getChatId()}::${charName}`;
-        return [newK, oldK];
+    function storageKeys(name, isUser) {
+        return [makeKey(name, isUser), `${getChatId()}::${name}`];
     }
 
-    const getVideoUrl = (charName, isUser) => {
+    const getVideoUrl = (name, isUser) => {
         const store = load(VIDEO_KEY);
-        const [k, oldK] = storageKeys(charName, isUser);
-        return store[k] || store[oldK] || store[charName] || '';
+        const [k, oldK] = storageKeys(name, isUser);
+        return store[k] || store[oldK] || store[name] || '';
     };
 
-    const setVideoUrl = (charName, url, isUser) => {
+    const setVideoUrl = (name, url, isUser) => {
         const d = load(VIDEO_KEY);
-        const k = makeKey(charName, isUser);
+        const k = makeKey(name, isUser);
         if (url) d[k] = url;
         else delete d[k];
         save(VIDEO_KEY, d);
         mediaCache.delete(k);
     };
 
-    const getPos = (charName, isUser) => {
-        const [k, oldK] = storageKeys(charName, isUser);
+    const getPos = (name, isUser) => {
+        const [k, oldK] = storageKeys(name, isUser);
         if (posCache.has(k)) return posCache.get(k);
         const store = load(POS_KEY);
-        const p = store[k] || store[oldK] || store[charName];
+        const p = store[k] || store[oldK] || store[name];
         const val = p ? { x: Number(p.x) || 0, y: Number(p.y) || 0 } : { x: 0, y: 0 };
         posCache.set(k, val);
         return val;
     };
 
-    const setPos = (charName, x, y, isUser) => {
+    const setPos = (name, x, y, isUser) => {
         const d = load(POS_KEY);
-        const k = makeKey(charName, isUser);
+        const k = makeKey(name, isUser);
         d[k] = { x, y };
         save(POS_KEY, d);
         posCache.set(k, { x, y });
     };
 
-    const getScale = (charName, isUser) => {
-        const [k, oldK] = storageKeys(charName, isUser);
+    const getScale = (name, isUser) => {
+        const [k, oldK] = storageKeys(name, isUser);
         if (scaleCache.has(k)) return scaleCache.get(k);
         const store = load(SCALE_KEY);
-        const val = Number(store[k] || store[oldK] || store[charName]) || 1.0;
+        const val = Number(store[k] || store[oldK] || store[name]) || 1.0;
         scaleCache.set(k, val);
         return val;
     };
 
-    const setScale = (charName, s, isUser) => {
+    const setScale = (name, s, isUser) => {
         const d = load(SCALE_KEY);
-        const k = makeKey(charName, isUser);
+        const k = makeKey(name, isUser);
         if (s && s > MIN_SCALE) d[k] = s;
         else delete d[k];
         save(SCALE_KEY, d);
@@ -226,74 +225,112 @@
 
     const activeBlobUrls = new Map();
 
-    async function resolveAvatarSource(charName, isUser) {
-        const k = makeKey(charName, isUser);
+    async function resolveAvatarSource(name, isUser) {
+        const k = makeKey(name, isUser);
         /* 内存缓存命中：同步返回，不再等 IndexedDB，避免新楼层闪一下 */
         if (mediaCache.has(k)) return mediaCache.get(k);
-        const localBlob = await getLocalFile(k, charName);
+
+        const localBlob = await getLocalFile(k, null);
         let result = null;
         if (localBlob) {
             if (activeBlobUrls.has(k)) {
-                URL.revokeObjectURL(activeBlobUrls.get(k));
+                try { URL.revokeObjectURL(activeBlobUrls.get(k)); } catch (e) { /* ignore */ }
             }
             const blobUrl = URL.createObjectURL(localBlob);
             activeBlobUrls.set(k, blobUrl);
             result = { src: blobUrl, isLocal: true, type: localBlob.type };
         } else {
-            const netUrl = getVideoUrl(charName, isUser);
+            const netUrl = getVideoUrl(name, isUser);
             if (netUrl) result = { src: netUrl, isLocal: false, type: '' };
         }
         mediaCache.set(k, result);
         return result;
     }
 
-    /* ========== 3. 工具函数 ========== */
+    /* ========== 3. 身份识别：角色名 / 是否用户 / 面具唯一 ID ========== */
     const clampVal = (v, min, max) => Math.max(min, Math.min(max, v));
 
-    /* 每个面具的唯一标识：用面具在磁盘上的文件夹 ID（不是显示名，因为可能重名）。
-     * 优先从酒馆上下文读，其次从面具下拉框读。 */
-    function getPersonaId() {
-        try {
-            const ctx = window.SillyTavern?.getContext?.();
-            if (ctx) {
-                // 尝试多种已知的上下文字段
-                if (ctx.personaId) return String(ctx.personaId);
-                if (ctx.persona_id) return String(ctx.persona_id);
-                if (ctx.persona?.id) return String(ctx.persona.id);
-            }
-        } catch (e) {}
-        // 从面具选择下拉框读 value（通常是文件夹名/UUID）
-        try {
-            const sel = document.getElementById('persona_select')
-                || document.querySelector('select#persona_select')
-                || document.querySelector('#user_settings select[name="persona"]');
-            if (sel && sel.value) return 'sel_' + String(sel.value);
-        } catch (e) {}
-        // 最终兜底：用显示名（可能重名，但至少比没有强）
-        try {
-            const ctx = window.SillyTavern?.getContext?.();
-            if (ctx?.name1) return 'name_' + String(ctx.name1).trim();
-        } catch (e) {}
-        return 'default_persona';
-    }
-
     function getCharName(mes) {
-        return mes.getAttribute('ch_name')
-            || mes.querySelector('.ch_name')?.textContent?.trim()
-            || mes.querySelector('.mesAvatarWrapper')?.getAttribute('ch_name')
-            || 'default';
+        const attr = mes.getAttribute('ch_name');
+        if (attr && attr.trim()) return attr.trim();
+
+        /* .ch_name 里还有时间戳节点，先取 name_text，避免把时间混进存储键 */
+        const nameSpan = mes.querySelector('.ch_name .name_text');
+        if (nameSpan && nameSpan.textContent.trim()) return nameSpan.textContent.trim();
+
+        const wrap = mes.querySelector('.mesAvatarWrapper')?.getAttribute('ch_name');
+        if (wrap) return wrap;
+
+        return mes.querySelector('.ch_name')?.textContent?.trim() || 'default';
     }
 
-    /* 判断这条消息是不是用户（面具）发的，用于独立存档键 */
     function isUserMessage(mes) {
         return mes.classList.contains('is_user')
             || mes.getAttribute('is_user') === 'true'
             || mes.getAttribute('isUser') === 'true';
     }
 
-    /* 统一入口：拿到这条消息对应的存储名。
-     * 用户面具用唯一 ID（不依赖显示名，避免重名面具串档）；
-     * 角色消息用 DOM 上的 ch_name。 */
+    /* 面具（persona）必须用磁盘唯一 ID，不能用显示名——用户存在同名面具。
+       来源 1：用户消息头像 src 里的 /thumbnail?type=persona&file=xxx
+       来源 2：面具管理面板 .avatar-container.selected 的 data-avatar-id
+       兜底 3：上次成功解析到的 ID（页面刚加载、面板还没渲染时也别退成固定值） */
+    let personaIdCache = { id: '', ts: 0 };
+    const PERSONA_ID_KEY = 'st_avatar_last_persona_id';
+
+    function rememberPersonaId(id) {
+        if (!id || id === 'default_persona') return;
+        try { localStorage.setItem(PERSONA_ID_KEY, id); } catch (e) { /* ignore */ }
+    }
+
+    function storedPersonaId() {
+        try { return localStorage.getItem(PERSONA_ID_KEY) || ''; } catch (e) { return ''; }
+    }
+
+    function getPersonaId() {
+        const now = Date.now();
+        if (personaIdCache.id && now - personaIdCache.ts < 1000) return personaIdCache.id;
+
+        let id = '';
+        try {
+            const mes = document.querySelector('#chat .mes.is_user');
+            const img = mes && mes.querySelector('.avatar img');
+            if (img && img.src) {
+                const u = new URL(img.src, location.origin);
+                if (u.searchParams.get('type') === 'persona') {
+                    id = decodeURIComponent(u.searchParams.get('file') || '');
+                }
+            }
+        } catch (e) { /* ignore */ }
+
+        if (!id) {
+            const sel = document.querySelector('#user_avatar_block .avatar-container.selected');
+            id = (sel && sel.getAttribute('data-avatar-id')) || '';
+        }
+
+        if (!id) id = storedPersonaId();
+        if (id) rememberPersonaId(id);
+
+        /* 解析不到就短缓存，等面板渲染好再来一次，别把空值钉死 */
+        personaIdCache = id ? { id, ts: now } : { id: 'default_persona', ts: 0 };
+        return id || 'default_persona';
+    }
+
+    function invalidatePersonaId() {
+        personaIdCache = { id: '', ts: 0 };
+    }
+
+    /* 面板入口用：取当前角色的存储名（与消息里的 ch_name 保持一致） */
+    function getCharStoreName() {
+        const mes = document.querySelector('#chat .mes:not(.is_user)');
+        if (mes) {
+            const n = getCharName(mes);
+            if (n && n !== 'default') return n;
+        }
+        const ctx = getCtx();
+        const ch = ctx.characters ? (ctx.characters[ctx.characterId] || ctx.characters[Number(ctx.characterId)]) : null;
+        return (ch && ch.name) || ctx.name2 || 'default';
+    }
+
     function getStoreName(mes) {
         return isUserMessage(mes) ? getPersonaId() : getCharName(mes);
     }
@@ -316,255 +353,901 @@
         return null;
     }
 
-    /* ========== 4. 轻量弹窗 ========== */
+    /* ========== 4. 写酒馆原生头像（服务器 API，绕开酒馆自己的裁剪弹窗） ========== */
+    function getCtx() {
+        try {
+            return (window.SillyTavern && window.SillyTavern.getContext && window.SillyTavern.getContext()) || {};
+        } catch (e) {
+            return {};
+        }
+    }
+
+    /* getRequestHeaders() 默认带 Content-Type: application/json，multipart 必须去掉 */
+    function formHeaders() {
+        const out = {};
+        try {
+            const ctx = getCtx();
+            const h = (ctx.getRequestHeaders && ctx.getRequestHeaders()) || {};
+            Object.keys(h).forEach((k) => {
+                if (k.toLowerCase() !== 'content-type') out[k] = h[k];
+            });
+        } catch (e) { /* ignore */ }
+        const tok = document.querySelector('#csrf_token')?.value;
+        if (tok && !out['X-CSRF-Token']) out['X-CSRF-Token'] = tok;
+        return out;
+    }
+
+    function pngFile(blob, fileName) {
+        return new File([blob], fileName, { type: 'image/png' });
+    }
+
+    function thumbFileOf(src) {
+        try {
+            const u = new URL(src, location.origin);
+            return { type: u.searchParams.get('type'), file: u.searchParams.get('file') };
+        } catch (e) {
+            return { type: null, file: null };
+        }
+    }
+
+    /* 上传后必须刷新缩略图缓存，否则浏览器还在用旧图 */
+    async function bustAndRefreshAvatar(type, file) {
+        const base = `/thumbnail?type=${type}&file=${encodeURIComponent(file)}`;
+        try { await fetch(base, { cache: 'reload' }); } catch (e) { /* ignore */ }
+
+        const busted = `${base}&t=${Date.now()}`;
+        const apply = (img) => {
+            if (!img || img.dataset.avatarCustom === '1') return;   // 自定义叠加层别覆盖
+            img.src = busted;
+            /* 记忆里"原始头像地址"也要一起更新，否则恢复原生时又用回旧缓存图 */
+            const av = img.closest('.avatar');
+            if (av && av.dataset.origSrc) av.dataset.origSrc = busted;
+        };
+
+        document.querySelectorAll('img').forEach((img) => {
+            const src = img.getAttribute('src') || '';
+            if (!src || src.indexOf(`type=${type}`) < 0) return;
+            const f = thumbFileOf(img.src);
+            if (f.type === type && f.file && f.file === file) apply(img);
+        });
+
+        if (type === 'avatar') {
+            const prev = document.getElementById('avatar_load_preview');
+            if (prev) apply(prev);
+        }
+    }
+
+    /**
+     * 把一张 PNG 写进酒馆原生头像。
+     * 角色：POST /api/characters/edit-avatar（avatar_url = 角色头像文件名）
+     * 面具：POST /api/avatars/upload（overwrite_name = 面具唯一 ID）
+     * 都不带 crop 参数 → 服务端按原尺寸保存，不会被压到 768。
+     */
+    async function writeNativeAvatar(isUser, name, blob) {
+        const headers = formHeaders();
+        try {
+            if (isUser) {
+                const personaId = (name && name !== 'default_persona') ? name : getPersonaId();
+                if (!personaId || personaId === 'default_persona') return { ok: false, reason: 'no-persona' };
+
+                const fd = new FormData();
+                fd.append('avatar', pngFile(blob, 'persona.png'));
+                fd.append('overwrite_name', personaId);
+                const res = await fetch('/api/avatars/upload', { method: 'POST', headers, body: fd, cache: 'no-cache' });
+                if (!res.ok) return { ok: false, reason: `http-${res.status}` };
+
+                /* 服务端可能返回实际落盘文件名，以它为准刷新缩略图 */
+                let finalId = personaId;
+                try {
+                    const data = await res.clone().json();
+                    if (data && data.path) finalId = data.path;
+                } catch (e) { /* 有的版本无 json */ }
+
+                await bustAndRefreshAvatar('persona', finalId);
+                return { ok: true };
+            }
+
+            const ctx = getCtx();
+            const ch = ctx.characters
+                ? (ctx.characters[ctx.characterId] || ctx.characters[Number(ctx.characterId)])
+                : null;
+            const avatarUrl = ch && ch.avatar;
+            if (!avatarUrl || avatarUrl === 'none') return { ok: false, reason: 'no-character' };
+
+            const fd = new FormData();
+            fd.append('avatar', pngFile(blob, 'avatar.png'));
+            fd.append('avatar_url', avatarUrl);
+            const res = await fetch('/api/characters/edit-avatar', { method: 'POST', headers, body: fd, cache: 'no-cache' });
+            if (!res.ok) return { ok: false, reason: `http-${res.status}` };
+
+            await bustAndRefreshAvatar('avatar', avatarUrl);
+            return { ok: true };
+        } catch (e) {
+            console.warn('[头像扩展] 原生头像写入异常', e);
+            return { ok: false, reason: 'exception' };
+        }
+    }
+
+    /* 视频取首帧 → 2:3 PNG，用来当原生头像，避免侧栏是旧图 */
+    function videoPosterBlob(blob) {
+        return new Promise((resolve) => {
+            let finished = false;
+            const url = URL.createObjectURL(blob);
+            const v = document.createElement('video');
+            v.muted = true;
+            v.playsInline = true;
+            v.preload = 'auto';
+            v.src = url;
+            v.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:2px;height:2px;opacity:0;pointer-events:none';
+            document.body.appendChild(v);
+
+            const finish = (res) => {
+                if (finished) return;
+                finished = true;
+                try { v.remove(); } catch (e) { /* ignore */ }
+                try { URL.revokeObjectURL(url); } catch (e) { /* ignore */ }
+                resolve(res);
+            };
+
+            const grab = () => {
+                try {
+                    const w = v.videoWidth;
+                    const h = v.videoHeight;
+                    if (!w || !h) return finish(null);
+                    let sw = w;
+                    let sh = w * AV_H_PER_W;
+                    if (sh > h) { sh = h; sw = h / AV_H_PER_W; }
+                    const sx = (w - sw) / 2;
+                    const sy = (h - sh) / 2;
+                    const outH = Math.max(AV_MIN_H, Math.min(AV_MAX_H, Math.round(sh)));
+                    const outW = Math.round(outH / AV_H_PER_W);
+                    const c = document.createElement('canvas');
+                    c.width = outW;
+                    c.height = outH;
+                    const g = c.getContext('2d');
+                    g.imageSmoothingQuality = 'high';
+                    g.drawImage(v, sx, sy, sw, sh, 0, 0, outW, outH);
+                    c.toBlob((b) => finish(b), 'image/png');
+                } catch (e) {
+                    finish(null);
+                }
+            };
+
+            v.addEventListener('loadeddata', () => {
+                try { v.currentTime = 0.08; } catch (e) { /* 有些格式不支持 seek */ }
+                grab();
+            });
+            v.addEventListener('seeked', grab);
+            setTimeout(() => finish(null), 5000);
+        });
+    }
+
+    function toast(msg, isWarn) {
+        try {
+            const t = window.toastr;
+            if (t) {
+                if (isWarn && t.warning) t.warning(msg, '头像');
+                else if (t.info) t.info(msg, '头像');
+                else if (t.success) t.success(msg, '头像');
+                return;
+            }
+        } catch (e) { /* ignore */ }
+        console.log('[头像扩展]', msg);
+    }
+
+    /* ========== 5. 统一弹窗（Shadow DOM：选择 / 裁剪 两步） ========== */
     let modalHost = null;
-    let modalResolve = null;
-    let pendingFileBlob = null;
+    let modalTarget = null;              // { isUser, name, label }
+    let pending = null;                   // { kind:'image'|'video', blob, w, h }
 
     function ensureModal() {
         if (modalHost) return modalHost;
 
         modalHost = document.createElement('div');
-        modalHost.id = 'st-avatar-drag-modal';
-        modalHost.style.cssText = 'position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:2147483000;pointer-events:none;display:none;';
+        modalHost.id = 'st-avatar-plus-modal';
+        modalHost.style.cssText = 'position:fixed;inset:0;z-index:2147483000;pointer-events:none;display:none;';
         (document.documentElement || document.body).appendChild(modalHost);
 
         const shadow = modalHost.attachShadow({ mode: 'open' });
         shadow.innerHTML = `
 <style>
 :host { all: initial; }
-* { box-sizing: border-box; margin: 0; padding: 0; font-family: inherit; }
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 .overlay {
     position: absolute; inset: 0;
     display: flex; align-items: center; justify-content: center;
-    background: rgba(0,0,0,.45);
-    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
-    padding: 20px; pointer-events: auto;
-    animation: fadeIn .18s ease-out;
+    padding: 18px; pointer-events: auto;
+    background: rgba(8,9,12,.62);
+    -webkit-backdrop-filter: blur(14px) saturate(130%);
+    backdrop-filter: blur(14px) saturate(130%);
+    animation: fade .16s ease-out;
 }
-@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-@keyframes slideUp { from { opacity: 0; transform: translateY(12px) scale(.97); } to { opacity: 1; transform: none; } }
+@keyframes fade { from { opacity: 0 } to { opacity: 1 } }
 .card {
-    width: min(92vw, 380px); max-height: 86vh; overflow-y: auto;
-    background: rgba(28,29,36,.92);
-    border: 1px solid rgba(255,255,255,.08);
-    border-radius: 16px;
-    padding: 22px;
-    color: #f0f0f2;
-    box-shadow: 0 20px 60px rgba(0,0,0,.4);
-    animation: slideUp .22s cubic-bezier(.2,.8,.2,1);
+    width: min(94vw, 430px); max-height: 90vh;
+    display: flex; flex-direction: column;
+    background: linear-gradient(180deg, rgba(38,39,46,.96) 0%, rgba(26,27,33,.98) 100%);
+    border: 1px solid rgba(255,255,255,.10);
+    border-radius: 20px;
+    box-shadow: 0 24px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(0,0,0,.35) inset, 0 1px 0 rgba(255,255,255,.07) inset;
+    padding: 18px;
+    color: #eceef2;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Segoe UI", system-ui, sans-serif;
+    font-size: 14px;
+    overflow: hidden;
+    animation: rise .2s cubic-bezier(.22,.9,.3,1);
 }
-.head { display: flex; align-items: center; gap: 8px; margin-bottom: 18px; }
+@keyframes rise { from { opacity: 0; transform: translateY(10px) scale(.98) } to { opacity: 1; transform: none } }
+.head { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
 .badge {
-    font-size: 10px; font-weight: 600; letter-spacing: .5px;
-    padding: 2px 8px; border-radius: 6px; text-transform: uppercase;
+    font-size: 11px; line-height: 1; padding: 5px 8px; border-radius: 999px;
+    font-weight: 600; letter-spacing: .02em; white-space: nowrap;
 }
-.badge.persona { background: rgba(16,185,129,.15); color: #34d399; }
-.badge.char    { background: rgba(74,144,226,.15); color: #60a5fa; }
-.title { font-size: 16px; font-weight: 600; color: #f0f0f2; }
-.input-row { display: flex; gap: 8px; margin-bottom: 8px; }
-input[type=url] {
-    flex: 1; padding: 11px 14px; border-radius: 10px;
-    border: 1px solid rgba(255,255,255,.1); background: rgba(0,0,0,.25); color: #fff;
-    font-size: 14px; outline: none; transition: border-color .15s;
+.badge--c { background: rgba(74,144,226,.18); color: #7cb0f5; border: 1px solid rgba(74,144,226,.35); }
+.badge--u { background: rgba(236,124,178,.16); color: #f0a0c8; border: 1px solid rgba(236,124,178,.34); }
+.badge--n { background: rgba(255,255,255,.08); color: #c9ccd4; border: 1px solid rgba(255,255,255,.12); }
+.name {
+    flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: #b9bec9;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-input[type=url]:focus { border-color: rgba(74,144,226,.6); }
-input[type=url]::placeholder { color: rgba(255,255,255,.3); }
-.file-btn {
-    padding: 0 14px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1);
-    border-radius: 10px; color: #e2e8f0; font-size: 13px; font-weight: 500;
-    cursor: pointer; display: flex; align-items: center; justify-content: center;
-    white-space: nowrap; -webkit-tap-highlight-color: transparent;
-    transition: background .15s;
+.iconbtn {
+    flex: 0 0 auto; width: 28px; height: 28px; border-radius: 50%; padding: 0;
+    border: none; background: rgba(255,255,255,.08); color: #b9bec9;
+    font-size: 16px; line-height: 1; cursor: pointer; display: flex;
+    align-items: center; justify-content: center; -webkit-tap-highlight-color: transparent;
+    transition: background .15s ease, color .15s ease;
 }
-.file-btn:hover { background: rgba(255,255,255,.12); }
-.file-btn svg { width: 14px; height: 14px; margin-right: 6px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-.status-tip { font-size: 12px; color: #34d399; margin: 6px 0 2px; display: none; }
-.hint { margin-top: 12px; font-size: 11.5px; color: rgba(255,255,255,.35); line-height: 1.6; }
-.hint b { color: rgba(255,255,255,.55); font-weight: 500; }
-.btns { display: flex; gap: 8px; margin-top: 18px; }
+.iconbtn:hover { background: rgba(255,255,255,.16); color: #fff; }
+.picker {
+    width: 100%; display: flex; align-items: center; gap: 12px;
+    padding: 14px 14px; border-radius: 14px; cursor: pointer;
+    border: 1px dashed rgba(122,176,245,.45);
+    background: rgba(74,144,226,.08);
+    color: #dce7f6; text-align: left; font: inherit;
+    -webkit-tap-highlight-color: transparent;
+    transition: background .15s ease, border-color .15s ease;
+}
+.picker:hover { background: rgba(74,144,226,.14); border-color: rgba(122,176,245,.7); }
+.picker:active { transform: scale(.99); }
+.picker svg { flex: 0 0 auto; width: 22px; height: 22px; stroke: #7cb0f5; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.picker-txt { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.picker-t { font-size: 14px; font-weight: 600; color: #e8eefa; }
+.picker-s { font-size: 11.5px; color: #8f97a6; }
+.or { display: flex; align-items: center; gap: 10px; margin: 16px 0 12px; }
+.or::before, .or::after { content: ""; flex: 1; height: 1px; background: rgba(255,255,255,.09); }
+.or span { font-size: 11px; color: #767d8b; letter-spacing: .04em; }
+.url {
+    width: 100%; padding: 12px 13px; border-radius: 12px;
+    border: 1px solid rgba(255,255,255,.12); background: rgba(0,0,0,.28);
+    color: #fff; font: inherit; outline: none;
+    transition: border-color .15s ease, background .15s ease;
+}
+.url::placeholder { color: #5f6673; }
+.url:focus { border-color: rgba(122,176,245,.6); background: rgba(0,0,0,.38); }
+.state {
+    margin-top: 12px; font-size: 11.5px; color: #7f8797;
+    display: flex; align-items: center; gap: 7px;
+}
+.dot { width: 6px; height: 6px; border-radius: 50%; background: #5b6270; flex: 0 0 auto; }
+.dot--on { background: #46c18b; box-shadow: 0 0 8px rgba(70,193,139,.6); }
+.hint { margin-top: 14px; font-size: 11.5px; line-height: 1.65; color: #767d8b; }
+.chip {
+    margin-top: 12px; display: none; align-items: center; gap: 9px;
+    padding: 9px 11px; border-radius: 11px;
+    background: rgba(70,193,139,.10); border: 1px solid rgba(70,193,139,.28);
+    color: #8fe0b6; font-size: 12px;
+}
+.chip .ok { font-size: 13px; }
+.foot { display: flex; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
 button {
-    border: none; border-radius: 10px; padding: 11px 0; cursor: pointer;
-    font-size: 14px; font-weight: 500; -webkit-tap-highlight-color: transparent;
-    transition: opacity .12s, background .12s;
+    font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+    border: none; border-radius: 12px; padding: 11px 16px; color: #fff;
+    -webkit-tap-highlight-color: transparent; white-space: nowrap;
 }
-button:active { opacity: .75; }
-.primary { flex: 1.5; background: #4a90e2; color: #fff; font-weight: 600; }
-.primary:hover { background: #3a7fd1; }
-.restore { flex: 1; background: rgba(255,255,255,.06); color: #f87171; border: 1px solid rgba(248,113,113,.25); }
-.restore:hover { background: rgba(248,113,113,.12); }
-.cancel { flex: .8; background: transparent; color: rgba(255,255,255,.4); }
-.cancel:hover { background: rgba(255,255,255,.06); }
-.divider { height: 1px; background: rgba(255,255,255,.06); margin: 14px 0 0; }
-.reset-pos {
-    display: block; width: 100%; text-align: center; margin-top: 10px;
-    font-size: 12px; color: rgba(255,255,255,.3); background: none;
+.btn {
+    flex: 1 1 auto; min-width: 74px; padding: 11px 0; border: none; border-radius: 12px;
+    font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition: filter .15s ease, background .15s ease;
 }
-.reset-pos:hover { color: rgba(255,255,255,.6); }
+.btn:active { filter: brightness(.9); }
+.primary { flex: 1.5 1 auto; background: linear-gradient(180deg,#5b9df0,#3d84e0); color: #fff; box-shadow: 0 4px 14px rgba(61,132,224,.35); }
+.cancel  { background: rgba(255,255,255,.07); color: #b9bec9; }
+.ghost   { background: rgba(255,255,255,.07); color: #9aa1ae; font-weight: 500; }
+.subrow { display: flex; justify-content: center; margin-top: 12px; }
+.linkbtn {
+    border: none; background: none; color: #6f7684; font: inherit; font-size: 11.5px;
+    cursor: pointer; padding: 4px; text-decoration: underline; text-underline-offset: 3px;
+    -webkit-tap-highlight-color: transparent;
+}
+.linkbtn:hover { color: #98a0ae; }
+/* 裁剪页 */
+.cropcard { padding: 16px; }
+.cropwrap {
+    position: relative; width: 100%; border-radius: 14px; overflow: hidden;
+    background: #0b0c0f; border: 1px solid rgba(255,255,255,.08);
+}
+.stage { position: relative; width: 100%; height: min(52vh, 420px); touch-action: none; }
+.stage img {
+    position: absolute; user-select: none; -webkit-user-drag: none; pointer-events: none;
+    image-rendering: auto;
+}
+.sel {
+    position: absolute; border: 1px solid rgba(255,255,255,.9);
+    box-shadow: 0 0 0 9999px rgba(0,0,0,.62);
+    cursor: move;
+}
+.sel::after {
+    content: ""; position: absolute; inset: 0;
+    border: 1px solid rgba(74,144,226,.0);
+    background:
+        linear-gradient(to right, rgba(255,255,255,.34) 1px, transparent 1px) 0 0 / 33.333% 100%,
+        linear-gradient(to bottom, rgba(255,255,255,.34) 1px, transparent 1px) 0 0 / 100% 33.333%;
+    opacity: .85; pointer-events: none;
+}
+.handle {
+    position: absolute; width: 18px; height: 18px; border-radius: 5px;
+    background: #fff; border: 1.5px solid rgba(0,0,0,.35);
+    box-shadow: 0 2px 8px rgba(0,0,0,.45);
+}
+.handle[data-h="nw"] { left: -9px; top: -9px; cursor: nwse-resize; }
+.handle[data-h="ne"] { right: -9px; top: -9px; cursor: nesw-resize; }
+.handle[data-h="sw"] { left: -9px; bottom: -9px; cursor: nesw-resize; }
+.handle[data-h="se"] { right: -9px; bottom: -9px; cursor: nwse-resize; }
 </style>
 <div class="overlay">
-    <div class="card">
-        <div class="head">
-            <span class="badge" id="badge"></span>
-            <div class="title" id="title"></div>
-        </div>
-        <div class="input-row">
-            <input id="input" type="url" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false"
-                   placeholder="粘贴图片/视频链接"/>
-            <button class="file-btn" id="uploadBtn">
-                <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
-                本地上传
-            </button>
-            <input type="file" id="fileInput" accept="video/mp4,video/webm,image/gif,image/png,image/jpeg,image/webp" style="display:none;"/>
-        </div>
-        <div class="status-tip" id="statusTip"></div>
-        <div class="hint">
-            <b>双击头像</b>进入拖动 · 滚轮/双指缩放<br>
-            设置独立绑定当前角色与当前存档，互不干扰
-        </div>
-        <div class="btns">
-            <button class="cancel" id="cancel">取消</button>
-            <button class="restore" id="restore">恢复原生</button>
-            <button class="primary" id="ok">应用</button>
-        </div>
-        <button class="reset-pos" id="reset">重置位置与缩放</button>
+  <div class="card" id="pickPage">
+    <div class="head">
+      <span class="badge" id="roleBadge">角色</span>
+      <span class="name" id="nameText"></span>
+      <button class="iconbtn" id="closePick" title="关闭">&times;</button>
     </div>
+
+    <button class="picker" id="fileBtn" type="button">
+      <svg viewBox="0 0 24 24"><path d="M12 15V3m0 0L8 7m4-4l4 4"/><path d="M3 15v3a2 2 0 002 2h14a2 2 0 002-2v-3"/></svg>
+      <span class="picker-txt">
+        <span class="picker-t">选择本机文件</span>
+        <span class="picker-s">图片会自动裁成 2:3 写入原生头像；视频作为动态头像</span>
+      </span>
+    </button>
+    <input id="fileInput" type="file" accept="image/*,video/*" style="display:none">
+
+    <div class="or"><span>或粘贴链接</span></div>
+    <input class="url" id="urlInput" type="url" inputmode="url" autocapitalize="off"
+           autocorrect="off" spellcheck="false" placeholder="https://… 图片或视频直链">
+
+    <div class="state"><span class="dot" id="stateDot"></span><span id="stateText">酒馆原生头像</span></div>
+    <div class="chip" id="chip"><span class="ok">✓</span><span id="chipText"></span></div>
+
+    <div class="hint">
+      图片写入原生头像后，侧栏、角色列表、手机端与聊天头像同步，不再出现两套图；<br>
+      位置与缩放按「存档 + 角色/面具」独立保存，新楼层一出现就是调节后的位置。
+    </div>
+
+    <div class="foot">
+      <button class="ghost" id="nativeBtn" type="button">恢复原生</button>
+      <button class="ghost" id="resetBtn" type="button">重置位置</button>
+      <button class="cancel" id="cancelBtn" type="button">取消</button>
+      <button class="primary" id="okBtn" type="button">应用</button>
+    </div>
+  </div>
+
+  <div class="card cropcard" id="cropPage" style="display:none">
+    <div class="head">
+      <span class="badge badge--n">裁剪</span>
+      <span class="name">2:3 头像 · 拖动框选保留区域</span>
+      <button class="iconbtn" id="closeCrop" title="关闭">&times;</button>
+    </div>
+    <div class="cropwrap">
+      <div class="stage" id="stage">
+        <img id="cropImg" alt="" draggable="false">
+        <div class="sel" id="sel">
+          <div class="handle" data-h="nw"></div>
+          <div class="handle" data-h="ne"></div>
+          <div class="handle" data-h="sw"></div>
+          <div class="handle" data-h="se"></div>
+        </div>
+      </div>
+    </div>
+    <div class="foot">
+      <button class="ghost" id="backBtn" type="button">返回</button>
+      <button class="ghost" id="cropReset" type="button">重置选区</button>
+      <button class="primary" id="cropOk" type="button">确认裁剪</button>
+    </div>
+  </div>
 </div>`;
 
-        const title = shadow.getElementById('title');
-        const badge = shadow.getElementById('badge');
-        const input = shadow.getElementById('input');
-        const uploadBtn = shadow.getElementById('uploadBtn');
-        const fileInput = shadow.getElementById('fileInput');
-        const statusTip = shadow.getElementById('statusTip');
-        const restoreBtn = shadow.getElementById('restore');
-        const resetPosBtn = shadow.getElementById('reset');
-        const cancelBtn = shadow.getElementById('cancel');
-        const okBtn = shadow.getElementById('ok');
+        /* ---- 元素引用 ---- */
+        const $ = (id) => shadow.getElementById(id);
         const overlay = shadow.querySelector('.overlay');
+        const pickPage = $('pickPage');
+        const cropPage = $('cropPage');
+        const fileInput = $('fileInput');
+        const urlInput = $('urlInput');
+        const chip = $('chip');
+        const chipText = $('chipText');
+        const stateDot = $('stateDot');
+        const stateText = $('stateText');
 
-        const close = (val) => {
-            modalHost.style.display = 'none';
-            pendingFileBlob = null;
-            statusTip.style.display = 'none';
-            if (modalResolve) modalResolve(val);
-            modalResolve = null;
+        /* ---- 裁剪状态 ---- */
+        const crop = {
+            img: $('cropImg'),
+            stage: $('stage'),
+            sel: $('sel'),
+            nat: { w: 0, h: 0 },
+            box: { x: 0, y: 0, w: 0, h: 0 },
+            r: { x: 0, y: 0, w: 0, h: 0 },
+            min: 48,
+            mode: null,
+            start: null,
+            srcUrl: '',
         };
 
-        uploadBtn.addEventListener('click', () => fileInput.click());
-        input.addEventListener('input', () => {
-            if (input.value.trim()) {
-                pendingFileBlob = null;
-                statusTip.style.display = 'none';
+        function closeAll() {
+            modalHost.style.display = 'none';
+            pickPage.style.display = '';
+            cropPage.style.display = 'none';
+            urlInput.value = '';
+            fileInput.value = '';
+            chip.style.display = 'none';
+            if (crop.srcUrl) {
+                try { URL.revokeObjectURL(crop.srcUrl); } catch (e) { /* ignore */ }
+                crop.srcUrl = '';
+            }
+            crop.nat = { w: 0, h: 0 };
+            pending = null;
+        }
+
+        /* ---- 状态提示（由 openAvatarModal 统一刷新） ---- */
+        function showPick() {
+            pickPage.style.display = '';
+            cropPage.style.display = 'none';
+        }
+
+        /* ---- 裁剪：布局 ---- */
+        function layoutCrop() {
+            if (!crop.nat.w || !crop.nat.h) return;
+            const st = crop.stage.getBoundingClientRect();
+            const W = st.width || 320;
+            const H = st.height || 420;
+            const ratio = crop.nat.w / crop.nat.h;
+
+            let dw = W;
+            let dh = W / ratio;
+            if (dh > H) { dh = H; dw = H * ratio; }
+            const dx = (W - dw) / 2;
+            const dy = (H - dh) / 2;
+
+            crop.box = { x: dx, y: dy, w: dw, h: dh };
+            crop.img.style.left = `${dx}px`;
+            crop.img.style.top = `${dy}px`;
+            crop.img.style.width = `${dw}px`;
+            crop.img.style.height = `${dh}px`;
+
+            /* 默认选区：2:3、占画面 88%，居中 */
+            let sw = Math.min(dw * 0.88, dh / AV_H_PER_W * 0.88);
+            let sh = sw * AV_H_PER_W;
+            crop.r = {
+                x: dx + (dw - sw) / 2,
+                y: dy + (dh - sh) / 2,
+                w: sw,
+                h: sh,
+            };
+            paintSel();
+        }
+
+        function paintSel() {
+            crop.sel.style.left = `${crop.r.x}px`;
+            crop.sel.style.top = `${crop.r.y}px`;
+            crop.sel.style.width = `${crop.r.w}px`;
+            crop.sel.style.height = `${crop.r.h}px`;
+        }
+
+        function stagePoint(e) {
+            const st = crop.stage.getBoundingClientRect();
+            return { x: e.clientX - st.left, y: e.clientY - st.top };
+        }
+
+        const inRect = (p, r) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+
+        crop.stage.addEventListener('pointerdown', (e) => {
+            if (cropPage.style.display === 'none') return;
+            const handle = e.target.closest ? e.target.closest('[data-h]') : null;
+            const p = stagePoint(e);
+
+            if (handle) {
+                crop.mode = handle.getAttribute('data-h');
+            } else if (inRect(p, crop.r)) {
+                crop.mode = 'move';
+            } else {
+                return;   // 框外点击不响应，避免误拖整图
+            }
+
+            crop.start = { p, r: { ...crop.r } };
+            try { crop.stage.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+            e.preventDefault();
+        });
+
+        crop.stage.addEventListener('pointermove', (e) => {
+            if (!crop.mode || !crop.start) return;
+            const p = stagePoint(e);
+            const dx = p.x - crop.start.p.x;
+            const dy = p.y - crop.start.p.y;
+            const b = crop.box;
+            const s = crop.start.r;
+
+            if (crop.mode === 'move') {
+                let nx = clampVal(s.x + dx, b.x, b.x + b.w - s.w);
+                let ny = clampVal(s.y + dy, b.y, b.y + b.h - s.h);
+                crop.r = { x: nx, y: ny, w: s.w, h: s.h };
+                paintSel();
+                return;
+            }
+
+            /* 四角缩放：对角固定，保持 2:3 */
+            const dirW = crop.mode.indexOf('w') >= 0;
+            const dirN = crop.mode.indexOf('n') >= 0;
+            const ax = dirW ? s.x + s.w : s.x;          // 锚点
+            const ay = dirN ? s.y + s.h : s.y;
+
+            let w = Math.abs(p.x - ax);
+            const availW = dirW ? (ax - b.x) : (b.x + b.w - ax);
+            const availH = dirN ? (ay - b.y) : (b.y + b.h - ay);
+            w = Math.min(w, availW, availH / AV_H_PER_W);
+            w = Math.max(crop.min, Math.min(w, b.w, b.h / AV_H_PER_W));
+
+            const h = w * AV_H_PER_W;
+            const nx = dirW ? ax - w : ax;
+            const ny = dirN ? ay - h : ay;
+            crop.r = { x: nx, y: ny, w, h };
+            paintSel();
+        });
+
+        const endCropDrag = () => {
+            crop.mode = null;
+            crop.start = null;
+        };
+        crop.stage.addEventListener('pointerup', endCropDrag);
+        crop.stage.addEventListener('pointercancel', endCropDrag);
+
+        function loadCropImage(blob) {
+            return new Promise((resolve) => {
+                if (crop.srcUrl) {
+                    try { URL.revokeObjectURL(crop.srcUrl); } catch (e) { /* ignore */ }
+                }
+                crop.srcUrl = URL.createObjectURL(blob);
+                crop.img.onload = () => {
+                    crop.nat = { w: crop.img.naturalWidth || 1, h: crop.img.naturalHeight || 1 };
+                    showCropPage();
+                    /* 等一帧让 stage 拿到真实尺寸 */
+                    requestAnimationFrame(() => requestAnimationFrame(() => layoutCrop()));
+                    resolve(true);
+                };
+                crop.img.onerror = () => resolve(false);
+                crop.img.src = crop.srcUrl;
+            });
+        }
+
+        function showCropPage() {
+            pickPage.style.display = 'none';
+            cropPage.style.display = '';
+        }
+
+        /* 按选区导出 2:3 PNG（不放大，源像素取整避免亚像素发虚） */
+        function exportCrop() {
+            return new Promise((resolve) => {
+                const b = crop.box;
+                const r = crop.r;
+                if (!b.w || !b.h) return resolve(null);
+
+                const sxF = (r.x - b.x) / b.w * crop.nat.w;
+                const syF = (r.y - b.y) / b.h * crop.nat.h;
+                const swF = r.w / b.w * crop.nat.w;
+                const shF = r.h / b.h * crop.nat.h;
+
+                let sx = Math.max(0, Math.round(sxF));
+                let sy = Math.max(0, Math.round(syF));
+                let sw = Math.max(1, Math.round(swF));
+                let sh = Math.max(1, Math.round(shF));
+                if (sx + sw > crop.nat.w) sw = crop.nat.w - sx;
+                if (sy + sh > crop.nat.h) sh = crop.nat.h - sy;
+
+                const outH = Math.max(AV_MIN_H, Math.min(AV_MAX_H, sh));
+                const outW = Math.round(outH / AV_H_PER_W);
+
+                const c = document.createElement('canvas');
+                c.width = outW;
+                c.height = outH;
+                const g = c.getContext('2d');
+                g.imageSmoothingEnabled = true;
+                g.imageSmoothingQuality = 'high';
+                try {
+                    g.drawImage(crop.img, sx, sy, sw, sh, 0, 0, outW, outH);
+                } catch (e) {
+                    return resolve(null);
+                }
+                c.toBlob((blob) => resolve(blob ? { blob, w: outW, h: outH } : null), 'image/png');
+            });
+        }
+
+        /* ---- 选择文件 ---- */
+        $('fileBtn').addEventListener('click', () => fileInput.click());
+
+        fileInput.addEventListener('change', async () => {
+            const file = fileInput.files && fileInput.files[0];
+            fileInput.value = '';
+            if (!file) return;
+            urlInput.value = '';
+
+            if (/^video\//i.test(file.type)) {
+                pending = { kind: 'video', blob: file };
+                chip.style.display = 'flex';
+                chipText.textContent = `已选择视频：${file.name} · ${(file.size / (1024 * 1024)).toFixed(1)} MB（点"应用"生效）`;
+                showPick();
+                return;
+            }
+            if (!/^image\//i.test(file.type)) {
+                toast('这个文件类型不支持，请选图片或视频', true);
+                return;
+            }
+            if (!(await loadCropImage(file))) {
+                toast('图片读取失败，换一张试试', true);
+                showPick();
             }
         });
 
-        fileInput.addEventListener('change', () => {
-            const file = fileInput.files[0];
-            if (!file) return;
-            pendingFileBlob = file;
-            input.value = '';
-            statusTip.textContent = `已就绪: ${file.name} (${(file.size / (1024 * 1024)).toFixed(1)} MB)`;
-            statusTip.style.display = 'block';
-            fileInput.value = '';
+        /* ---- 裁剪页按钮 ---- */
+        $('cropReset').addEventListener('click', () => {
+            layoutCrop();
+        });
+        $('backBtn').addEventListener('click', () => {
+            showPick();
+        });
+        $('closeCrop').addEventListener('click', () => {
+            showPick();
+        });
+        $('cropOk').addEventListener('click', async () => {
+            const res = await exportCrop();
+            if (!res) {
+                toast('裁剪失败，请重试', true);
+                return;
+            }
+            pending = { kind: 'image', blob: res.blob, w: res.w, h: res.h };
+            chip.style.display = 'flex';
+            chipText.textContent = `已裁剪 ${res.w}×${res.h} · 点"应用"写入原生头像`;
+            showPick();
         });
 
-        /* 恢复原生：清除自定义头像源（本地文件+URL），回到酒馆原生头像，保留位置/缩放 */
-        restoreBtn.addEventListener('click', async () => {
-            const name = modalHost.dataset.charName;
-            const isUser = modalHost.dataset.isUser === '1';
-            const k = makeKey(name, isUser);
-            setVideoUrl(name, '', isUser);
+        /* ---- 关闭 / 取消 ---- */
+        $('closePick').addEventListener('click', closeAll);
+        $('cancelBtn').addEventListener('click', closeAll);
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) closeAll();
+        });
+        shadow.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeAll();
+        });
+
+        /* ---- 恢复原生：清掉自定义媒体，保留位置与缩放 ---- */
+        $('nativeBtn').addEventListener('click', async () => {
+            if (!modalTarget) return;
+            const k = makeKey(modalTarget.name, modalTarget.isUser);
             await deleteLocalFile(k);
+            setVideoUrl(modalTarget.name, '', modalTarget.isUser);
             if (activeBlobUrls.has(k)) {
-                URL.revokeObjectURL(activeBlobUrls.get(k));
+                try { URL.revokeObjectURL(activeBlobUrls.get(k)); } catch (e) { /* ignore */ }
                 activeBlobUrls.delete(k);
             }
             clearAllCaches();
             initAll();
-            close({ restore: true });
+            toast('已恢复酒馆原生头像');
+            closeAll();
         });
 
-        /* 重置位置与缩放：只清位移/缩放，不动自定义头像源 */
-        resetPosBtn.addEventListener('click', () => {
-            const name = modalHost.dataset.charName;
-            const isUser = modalHost.dataset.isUser === '1';
-            setPos(name, 0, 0, isUser);
-            setScale(name, MIN_SCALE, isUser);
+        /* ---- 重置位置与缩放：只清位置，不动头像 ---- */
+        $('resetBtn').addEventListener('click', () => {
+            if (!modalTarget) return;
+            setPos(modalTarget.name, 0, 0, modalTarget.isUser);
+            setScale(modalTarget.name, MIN_SCALE, modalTarget.isUser);
             clearAllCaches();
             initAll();
-            close({ resetPos: true });
+            toast('已重置位置与缩放');
+            closeAll();
         });
 
-        cancelBtn.addEventListener('click', () => close({ cancel: true }));
+        /* ---- 应用 ---- */
+        $('okBtn').addEventListener('click', async () => {
+            if (!modalTarget) return;
+            const t = modalTarget;
+            const k = makeKey(t.name, t.isUser);
+            const url = urlInput.value.trim();
 
-        okBtn.addEventListener('click', async () => {
-            const name = modalHost.dataset.charName;
-            const isUser = modalHost.dataset.isUser === '1';
-            const k = makeKey(name, isUser);
-            const textUrl = input.value.trim();
-
-            if (pendingFileBlob) {
-                await saveLocalFile(k, pendingFileBlob);
-                setVideoUrl(name, '', isUser);
-            } else {
-                await deleteLocalFile(k);
-                if (activeBlobUrls.has(k)) {
-                    URL.revokeObjectURL(activeBlobUrls.get(k));
-                    activeBlobUrls.delete(k);
+            if (pending && pending.kind === 'image') {
+                /* 同一张裁剪图：一份写原生头像，一份存本地做高清显示源 */
+                await saveLocalFile(k, pending.blob);
+                setVideoUrl(t.name, '', t.isUser);
+                const native = await writeNativeAvatar(t.isUser, t.name, pending.blob);
+                if (!native.ok) {
+                    toast('原生头像写入失败，已保存到当前聊天（' + (native.reason || '未知原因') + '）', true);
+                } else {
+                    toast('已写入原生头像 · 高清显示');
                 }
-                setVideoUrl(name, textUrl, isUser);
+                clearAllCaches();
+                initAll();
+                closeAll();
+                return;
             }
-            clearAllCaches();
-            initAll();
-            close({ ok: true });
+
+            if (pending && pending.kind === 'video') {
+                await saveLocalFile(k, pending.blob);
+                setVideoUrl(t.name, '', t.isUser);
+                clearAllCaches();
+                initAll();
+                const poster = await videoPosterBlob(pending.blob);
+                if (poster) {
+                    await writeNativeAvatar(t.isUser, t.name, poster);
+                }
+                toast('已设为动态头像');
+                closeAll();
+                return;
+            }
+
+            if (url) {
+                urlInput.value = '';
+                if (/^(data:video\/|\S+\.(mp4|webm|mov)(\?|#|$))/i.test(url)) {
+                    await deleteLocalFile(k);
+                    setVideoUrl(t.name, url, t.isUser);
+                    if (activeBlobUrls.has(k)) {
+                        try { URL.revokeObjectURL(activeBlobUrls.get(k)); } catch (e) { /* ignore */ }
+                        activeBlobUrls.delete(k);
+                    }
+                    clearAllCaches();
+                    initAll();
+                    toast('已设为动态头像（链接）');
+                    closeAll();
+                    return;
+                }
+
+                /* 图片直链：尽力抓成 blob 写原生；跨域被拦就退回叠加 */
+                try {
+                    const resp = await fetch(url, { mode: 'cors' });
+                    if (!resp.ok) throw new Error('http ' + resp.status);
+                    const raw = await resp.blob();
+                    if (!/^image\//i.test(raw.type)) throw new Error('not image');
+                    const png = await loadCropImageQuiet(raw);
+                    if (!png) throw new Error('decode');
+                    await saveLocalFile(k, png);
+                    setVideoUrl(t.name, '', t.isUser);
+                    const native = await writeNativeAvatar(t.isUser, t.name, png);
+                    clearAllCaches();
+                    initAll();
+                    toast(native.ok ? '已写入原生头像' : '已设为当前聊天头像（原生写入失败）', !native.ok);
+                } catch (e) {
+                    await deleteLocalFile(k);
+                    setVideoUrl(t.name, url, t.isUser);
+                    if (activeBlobUrls.has(k)) {
+                        try { URL.revokeObjectURL(activeBlobUrls.get(k)); } catch (err) { /* ignore */ }
+                        activeBlobUrls.delete(k);
+                    }
+                    clearAllCaches();
+                    initAll();
+                    toast('已设为当前聊天头像（跨域无法写原生）', true);
+                }
+                closeAll();
+                return;
+            }
+
+            toast('先选一个文件，或粘贴链接', true);
         });
 
-        overlay.addEventListener('click', (e) => {
-            if (e.target === overlay) close({ cancel: true });
-        });
-        input.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') okBtn.click();
-        });
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape' && modalHost.style.display !== 'none') close({ cancel: true });
+        /* 链接图片先居中裁成 2:3，再走写原生流程 */
+        function loadCropImageQuiet(blob) {
+            return new Promise((resolve) => {
+                const u = URL.createObjectURL(blob);
+                const im = new Image();
+                im.onload = () => {
+                    try {
+                        const w = im.naturalWidth;
+                        const h = im.naturalHeight;
+                        let sw = w;
+                        let sh = w * AV_H_PER_W;
+                        if (sh > h) { sh = h; sw = h / AV_H_PER_W; }
+                        const sx = (w - sw) / 2;
+                        const sy = (h - sh) / 2;
+                        const outH = Math.max(AV_MIN_H, Math.min(AV_MAX_H, Math.round(sh)));
+                        const outW = Math.round(outH / AV_H_PER_W);
+                        const c = document.createElement('canvas');
+                        c.width = outW;
+                        c.height = outH;
+                        const g = c.getContext('2d');
+                        g.imageSmoothingQuality = 'high';
+                        g.drawImage(im, sx, sy, sw, sh, 0, 0, outW, outH);
+                        c.toBlob((b) => {
+                            try { URL.revokeObjectURL(u); } catch (e) { /* ignore */ }
+                            resolve(b);
+                        }, 'image/png');
+                    } catch (e) {
+                        resolve(null);
+                    }
+                };
+                im.onerror = () => {
+                    try { URL.revokeObjectURL(u); } catch (e) { /* ignore */ }
+                    resolve(null);
+                };
+                im.src = u;
+            });
+        }
+
+        /* 面板尺寸变化时重算裁剪布局 */
+        window.addEventListener('resize', () => {
+            if (modalHost.style.display !== 'none' && cropPage.style.display !== 'none') {
+                layoutCrop();
+            }
         });
 
         return modalHost;
     }
 
-    async function openVideoModal(charName, isUser) {
+    async function openAvatarModal(target) {
         ensureModal();
         const shadow = modalHost.shadowRoot;
-        modalHost.dataset.charName = charName;
-        modalHost.dataset.isUser = isUser ? '1' : '';
-        const k = makeKey(charName, !!isUser);
-        shadow.getElementById('title').textContent = isUser ? '我的面具' : charName;
-        const badge = shadow.getElementById('badge');
-        badge.textContent = isUser ? '面具' : '角色';
-        badge.className = 'badge ' + (isUser ? 'persona' : 'char');
-        shadow.getElementById('input').value = getVideoUrl(charName, !!isUser);
-        pendingFileBlob = null;
+        const $ = (id) => shadow.getElementById(id);
 
-        const hasLocal = await getLocalFile(k, charName);
-        const statusTip = shadow.getElementById('statusTip');
-        if (hasLocal) {
-            statusTip.textContent = `本地文件 · ${(hasLocal.size / (1024 * 1024)).toFixed(1)} MB`;
-            statusTip.style.display = 'block';
-        } else {
-            statusTip.style.display = 'none';
-        }
+        modalTarget = {
+            isUser: !!target.isUser,
+            name: target.name || (target.isUser ? getPersonaId() : getCharStoreName()),
+            label: target.label || (target.isUser ? '面具' : '角色'),
+        };
+        pending = null;
+
+        const badge = $('roleBadge');
+        badge.className = `badge ${modalTarget.isUser ? 'badge--u' : 'badge--c'}`;
+        badge.textContent = modalTarget.label;
+        $('nameText').textContent = modalTarget.name === 'default_persona' ? '默认面具' : modalTarget.name;
+
+        $('pickPage').style.display = '';
+        $('cropPage').style.display = 'none';
+        $('urlInput').value = '';
+        $('chip').style.display = 'none';
 
         modalHost.style.display = 'block';
-        setTimeout(() => shadow.getElementById('input').focus(), 100);
-        return new Promise((resolve) => {
-            modalResolve = resolve;
-        });
+        await refreshModalState();
+
+        /* 页面刚启动时面具面板可能还没渲染：稍等再解析一次唯一 ID */
+        if (modalTarget.isUser && modalTarget.name === 'default_persona') {
+            setTimeout(() => {
+                if (!modalTarget || !modalTarget.isUser) return;
+                const real = getPersonaId();
+                if (real && real !== 'default_persona') {
+                    modalTarget.name = real;
+                    $('nameText').textContent = real;
+                    refreshModalState();
+                }
+            }, 450);
+        }
     }
 
-    /* ========== 5. 核心：自适应画幅物理覆盖与锁边位移引擎 ========== */
+    async function refreshModalState() {
+        if (!modalHost || !modalTarget) return;
+        const shadow = modalHost.shadowRoot;
+        const dot = shadow.getElementById('stateDot');
+        const txt = shadow.getElementById('stateText');
+        const k = makeKey(modalTarget.name, modalTarget.isUser);
+        const local = await getLocalFile(k, null);
+        const net = getVideoUrl(modalTarget.name, modalTarget.isUser);
+        if (local) {
+            dot.className = 'dot dot--on';
+            txt.textContent = `当前：本地文件 ${(local.size / (1024 * 1024)).toFixed(1)} MB`;
+        } else if (net) {
+            dot.className = 'dot dot--on';
+            txt.textContent = '当前：网络链接';
+        } else {
+            dot.className = 'dot';
+            txt.textContent = '当前：酒馆原生头像';
+        }
+    }
 
-    /** 当前处于"编辑模式"（可拖动）的那个头像元素 */
+    /* ========== 6. 核心：自适应画幅物理覆盖与锁边位移引擎 ========== */
     let unlockedEl = null;
 
     function lockAvatarEdit() {
@@ -574,7 +1257,6 @@ button:active { opacity: .75; }
         unlockedEl = null;
     }
 
-    /** 点空白处 / 按 Esc 退出编辑模式，避免拖完忘记锁定又误触 */
     function bindUnlockGuards() {
         document.addEventListener('pointerdown', (e) => {
             if (!unlockedEl) return;
@@ -584,36 +1266,32 @@ button:active { opacity: .75; }
 
         document.addEventListener('keydown', (e) => {
             if (e.key !== 'Escape' || !unlockedEl) return;
-            if (modalHost && modalHost.style.display !== 'none') return; // 弹窗优先处理
+            if (modalHost && modalHost.style.display !== 'none') return;
             lockAvatarEdit();
         });
     }
 
-    function setupDrag(target, charName, isUser) {
+    function setupDrag(target, storeName, isUser) {
         const el = target.el;
         const mode = target.mode;
         const container = target.container;
-        if (!el) return;
+        if (!el || !container) return;
 
-        if (container) {
-            container.style.overflow = 'hidden';
-            if (getComputedStyle(container).position === 'static') {
-                container.style.position = 'relative';
-            }
+        container.style.overflow = 'hidden';
+        if (getComputedStyle(container).position === 'static') {
+            container.style.position = 'relative';
         }
 
-        // 角色名 / 面具类型可能随存档切换而变化，用可变值，避免重复绑定事件
-        let charNameNow = charName;
+        let nameNow = storeName;
         let isUserNow = !!isUser;
-        let pos = getPos(charNameNow, isUserNow);
-        let scale = Math.max(MIN_SCALE, getScale(charNameNow, isUserNow));
+        let pos = getPos(nameNow, isUserNow);
+        let scale = Math.max(MIN_SCALE, getScale(nameNow, isUserNow));
         let raf = 0;
+        let lastBox = null;   // 容器在流内的原始尺寸，用于 absolute 之后兜底
 
         const getMediaIntrinsicSize = () => {
             if (mode === 'background') return null;
-            if (el.tagName === 'VIDEO') {
-                return { w: el.videoWidth || 0, h: el.videoHeight || 0 };
-            }
+            if (el.tagName === 'VIDEO') return { w: el.videoWidth || 0, h: el.videoHeight || 0 };
             return { w: el.naturalWidth || 0, h: el.naturalHeight || 0 };
         };
 
@@ -621,7 +1299,6 @@ button:active { opacity: .75; }
             const intrinsic = getMediaIntrinsicSize();
             let renderW = boxW;
             let renderH = boxH;
-
             if (intrinsic && intrinsic.w > 0 && intrinsic.h > 0) {
                 const boxRatio = boxW / boxH;
                 const mediaRatio = intrinsic.w / intrinsic.h;
@@ -636,129 +1313,164 @@ button:active { opacity: .75; }
             return { renderW, renderH };
         };
 
-        const clampSafePosition = (x, y, s) => {
-            if (!container) return { x: 0, y: 0 };
+        const readBox = () => {
             const rect = container.getBoundingClientRect();
-            const boxW = rect.width || container.offsetWidth || 60;
-            const boxH = rect.height || container.offsetHeight || 60;
+            let w = rect.width;
+            let h = rect.height;
+            if (w > 2 && h > 2) {
+                lastBox = { w, h };
+                return lastBox;
+            }
+            w = container.offsetWidth;
+            h = container.offsetHeight;
+            if (w > 2 && h > 2) {
+                lastBox = { w, h };
+                return lastBox;
+            }
+            return null;
+        };
 
-            const { renderW, renderH } = getRenderDimensions(boxW, boxH);
+        const clampSafePosition = (x, y, s, box) => {
+            const { renderW, renderH } = getRenderDimensions(box.w, box.h);
             const totalW = renderW * s;
             const totalH = renderH * s;
-
-            const maxX = Math.max(0, (totalW - boxW) / 2);
-            const maxY = Math.max(0, (totalH - boxH) / 2);
-
+            const maxX = Math.max(0, (totalW - box.w) / 2);
+            const maxY = Math.max(0, (totalH - box.h) / 2);
             return {
                 x: clampVal(x, -maxX, maxX),
                 y: clampVal(y, -maxY, maxY),
             };
         };
 
+        /**
+         * fromRestore = true 时不重新 clamp。
+         * 新插入的楼层图片还没解码，容器可能量不到尺寸，此时 clamp 会把
+         * 已保存的位移错误归零 —— 这就是"位置自己回到原处"的真凶。
+         */
         const applyTransform = (x, y, s, fromRestore) => {
-            if (!container) return;
-            const rect = container.getBoundingClientRect();
-            const boxW = rect.width || container.offsetWidth || 60;
-            const boxH = rect.height || container.offsetHeight || 60;
-
-            const { renderW, renderH } = getRenderDimensions(boxW, boxH);
-            let safe;
-            if (fromRestore) {
-                /* 恢复存档位置时不重新 clamp：
-                 * 新消息刚插入时图片可能还没加载完（naturalWidth=0），
-                 * 这时 clamp 会把已保存的位置错误归零。
-                 * 图片加载完成后的 reapply 会用真实尺寸再 clamp 一次。 */
-                safe = { x, y };
-            } else {
-                safe = clampSafePosition(x, y, s);
+            let box = readBox();
+            if (!box) {
+                /* 容器还没量到尺寸（新楼层刚插入那一瞬）：
+                   至少先把位移摆到用户存的位置，别让人先看到"原位置"那一下；
+                   宽度/高度等下一次 load / rAF 再补齐。 */
+                if (mode !== 'background') {
+                    const ox = Math.round(x);
+                    const oy = Math.round(y);
+                    el.style.position = 'absolute';
+                    el.style.left = '50%';
+                    el.style.top = '50%';
+                    el.style.transformOrigin = 'center center';
+                    el.style.transform = `translate3d(calc(-50% + ${ox}px), calc(-50% + ${oy}px), 0px)`;
+                }
+                return;
             }
-            pos.x = safe.x;
-            pos.y = safe.y;
+
+            let px = x;
+            let py = y;
+            if (!fromRestore) {
+                const safe = clampSafePosition(x, y, s, box);
+                px = safe.x;
+                py = safe.y;
+            }
+
+            pos.x = px;
+            pos.y = py;
             scale = s;
 
             if (mode === 'background') {
-                const bgW = s * 100;
-                el.style.backgroundSize = `${bgW}% auto`;
-                el.style.backgroundPosition = `calc(50% + ${pos.x}px) calc(50% + ${pos.y}px)`;
-            } else {
-                /* 关键：放大不用 transform: scale()。
-                   transform 缩放是把已经栅格化好的位图再拉伸，放得越大越糊；
-                   这里直接把元素宽高按"渲染尺寸 × 缩放"算成整数像素，
-                   浏览器每次都是按最终尺寸重新采样原图，放大后依然是原图分辨率。 */
-                const drawW = Math.max(1, Math.round(renderW * s));
-                const drawH = Math.max(1, Math.round(renderH * s));
-                const offX = Math.round(pos.x);
-                const offY = Math.round(pos.y);
-
-                el.style.position = 'absolute';
-                el.style.left = '50%';
-                el.style.top = '50%';
-                el.style.width = `${drawW}px`;
-                el.style.height = `${drawH}px`;
-                el.style.minWidth = `${drawW}px`;
-                el.style.minHeight = `${drawH}px`;
-                el.style.maxWidth = 'none';
-                el.style.maxHeight = 'none';
-                el.style.objectFit = 'cover';
-                el.style.objectPosition = 'center center';
-                el.style.display = 'block';
-                el.style.transformOrigin = 'center center';
-                /* 只做整数像素位移，避免半像素重采样带来的糊边 */
-                el.style.transform = `translate3d(calc(-50% + ${offX}px), calc(-50% + ${offY}px), 0px)`;
+                el.style.backgroundSize = `${s * 100}% auto`;
+                el.style.backgroundPosition = `calc(50% + ${px}px) calc(50% + ${py}px)`;
+                return;
             }
+
+            /* 放大不用 transform: scale()：那是把已栅格化的位图再拉伸。
+               直接按"渲染尺寸 × 缩放"算整数像素宽高，浏览器每次按最终尺寸重采样原图。 */
+            const { renderW, renderH } = getRenderDimensions(box.w, box.h);
+            const drawW = Math.max(1, Math.round(renderW * s));
+            const drawH = Math.max(1, Math.round(renderH * s));
+            const offX = Math.round(px);
+            const offY = Math.round(py);
+
+            el.style.position = 'absolute';
+            el.style.left = '50%';
+            el.style.top = '50%';
+            el.style.width = `${drawW}px`;
+            el.style.height = `${drawH}px`;
+            el.style.minWidth = `${drawW}px`;
+            el.style.minHeight = `${drawH}px`;
+            el.style.maxWidth = 'none';
+            el.style.maxHeight = 'none';
+            el.style.objectFit = 'cover';
+            el.style.objectPosition = 'center center';
+            el.style.display = 'block';
+            el.style.transformOrigin = 'center center';
+            el.style.transform = `translate3d(calc(-50% + ${offX}px), calc(-50% + ${offY}px), 0px)`;
         };
 
         el.__applyStoredTransform = () => {
-            pos = getPos(charNameNow, isUserNow);
-            scale = Math.max(MIN_SCALE, getScale(charNameNow, isUserNow));
-            applyTransform(pos.x, pos.y, scale, true);
+            pos = getPos(nameNow, isUserNow);
+            scale = clampVal(getScale(nameNow, isUserNow) || 1, MIN_SCALE, MAX_SCALE);
+            applyTransform(pos.x, pos.y, scale, true);   // ★ 恢复存档不 clamp
         };
 
-        // 存档 / 角色切换时复用同一套事件绑定，只更新角色名与位移
-        el.__setChar = (name, isUser) => {
-            charNameNow = name;
-            if (typeof isUser === 'boolean') isUserNow = isUser;
+        el.__setChar = (name, isUserFlag) => {
+            nameNow = name;
+            if (typeof isUserFlag === 'boolean') isUserNow = isUserFlag;
             el.__applyStoredTransform();
         };
 
-        if (el.dataset.dragReady) {
-            return;
-        }
+        if (el.dataset.dragReady) return;
         el.dataset.dragReady = '1';
 
+        let pending = null;
+
+        /* 一帧只重绘一次，但坐标永远记最新的那份：
+           同一帧里连发的多次移动不能被忽略，否则松手时最后一段位移会丢，
+           看起来就像"拖过去了又弹回一点"。 */
         const schedule = (x, y, s) => {
+            pending = { x, y, s };
             if (raf) return;
             raf = requestAnimationFrame(() => {
                 raf = 0;
-                applyTransform(x, y, s);
+                const p = pending;
+                pending = null;
+                if (p) applyTransform(p.x, p.y, p.s, false);
             });
         };
 
+        /* 松手/结束前把最后一帧的位移补上，保证存的正是用户看到的那个位置 */
+        const flushPending = () => {
+            if (raf) { cancelAnimationFrame(raf); raf = 0; }
+            if (pending) {
+                const p = pending;
+                pending = null;
+                applyTransform(p.x, p.y, p.s, false);
+            }
+        };
+
         const reapply = () => {
-            try { el.__applyStoredTransform(); } catch (e) { /* 元素已移除 */ }
+            try {
+                el.__applyStoredTransform();
+                /* 两次补帧：图片解码/容器布局可能晚一帧才稳 */
+                requestAnimationFrame(() => {
+                    try { el.__applyStoredTransform(); } catch (e) { /* 元素已移除 */ }
+                });
+            } catch (e) { /* 元素已移除 */ }
         };
 
         if (el.tagName === 'IMG') {
-            // 每次加载完成都重算：酒馆重新渲染头像 / 换了图源后，尺寸会变
             el.addEventListener('load', reapply);
             el.addEventListener('error', reapply);
-            /* 浏览器缓存命中时 load 事件可能在绑监听器之前就触发了，
-             * 这里补一帧：等布局稳定后再按存档位置重绘一次，
-             * 避免新楼层因容器尺寸还没算出来而用 60px 兜底、看起来像回到原位。 */
-            if (el.complete) {
-                requestAnimationFrame(reapply);
-            }
         } else if (el.tagName === 'VIDEO') {
             el.addEventListener('loadedmetadata', reapply);
             el.addEventListener('loadeddata', reapply);
-            requestAnimationFrame(reapply);
         }
 
         el.__applyStoredTransform();
-        /* 再补一帧：确保容器尺寸已布局完成（新插入的 DOM 节点第一帧 rect 可能为 0） */
-        requestAnimationFrame(reapply);
+        /* 图片已经解码完成时 load 不会再触发，这里主动补一次 */
+        if (el.tagName === 'IMG' && el.complete) requestAnimationFrame(reapply);
 
-        /* ---------- 交互锁：默认锁定，双击才进入编辑模式，杜绝误触 ---------- */
+        /* ---------- 交互锁：默认锁定，双击才进入编辑模式 ---------- */
         const DBL_TAP_MS = 320;
         const DRAG_THRESHOLD = 5;
         const TAP_SLOP = 10;
@@ -774,7 +1486,6 @@ button:active { opacity: .75; }
         const setUnlocked = (v) => {
             if (unlocked === v) return;
             unlocked = v;
-
             if (v) {
                 if (unlockedEl && unlockedEl !== el) unlockedEl.__lockAvatar?.();
                 unlockedEl = el;
@@ -793,7 +1504,6 @@ button:active { opacity: .75; }
 
         el.__lockAvatar = () => setUnlocked(false);
 
-        /** 双击 / 双击轻点：进入或退出编辑模式 */
         const registerTap = () => {
             const now = Date.now();
             if (now - lastTapT < DBL_TAP_MS) {
@@ -804,7 +1514,7 @@ button:active { opacity: .75; }
             }
         };
 
-        /* 桌面端：滚轮缩放（仅编辑模式生效；锁定时不拦页面滚动） */
+        /* 桌面滚轮缩放（仅编辑模式） */
         el.addEventListener('wheel', (e) => {
             if (!unlocked) return;
             e.preventDefault();
@@ -812,34 +1522,23 @@ button:active { opacity: .75; }
             const step = e.deltaY < 0 ? SCALE_STEP : -SCALE_STEP;
             const newScale = clampVal(Math.round((scale + step) * 100) / 100, MIN_SCALE, MAX_SCALE);
             schedule(pos.x, pos.y, newScale);
-            setScale(charNameNow, newScale, isUserNow);
+            setScale(nameNow, newScale, isUserNow);
         }, { passive: false });
 
-        /* 桌面端：鼠标平移（锁定时完全不响应，避免误触拖走头像） */
+        /* 桌面鼠标平移 */
         let mDrag = false;
         let mLastX = 0;
         let mLastY = 0;
-
-        const mDown = (e) => {
-            if (!unlocked || e.button !== 0) return;
-            mDrag = true;
-            mLastX = e.clientX;
-            mLastY = e.clientY;
-            el.style.cursor = 'grabbing';
-            e.preventDefault();
-            e.stopPropagation();
-            // 只在拖拽期间监听 document，避免每个头像常驻全局事件
-            document.addEventListener('mousemove', mMove);
-            document.addEventListener('mouseup', mUp);
-        };
 
         const mMove = (e) => {
             if (!mDrag) return;
             const dx = e.clientX - mLastX;
             const dy = e.clientY - mLastY;
-            schedule(pos.x + dx, pos.y + dy, scale);
             mLastX = e.clientX;
             mLastY = e.clientY;
+            pos.x += dx;
+            pos.y += dy;
+            schedule(pos.x, pos.y, scale);
         };
 
         const mUp = () => {
@@ -848,18 +1547,27 @@ button:active { opacity: .75; }
             if (!mDrag) return;
             mDrag = false;
             el.style.cursor = unlocked ? 'grab' : '';
-            if (raf) {
-                cancelAnimationFrame(raf);
-                raf = 0;
+            flushPending();
+            const box = readBox();
+            if (box) {
+                const safe = clampSafePosition(pos.x, pos.y, scale, box);
+                applyTransform(safe.x, safe.y, scale, false);
+                setPos(nameNow, safe.x, safe.y, isUserNow);
             }
-            const safe = clampSafePosition(pos.x, pos.y, scale);
-            applyTransform(safe.x, safe.y, scale); // 补一帧，避免极快拖动时画面没跟上
-            setPos(charNameNow, safe.x, safe.y, isUserNow);
         };
 
-        el.addEventListener('mousedown', mDown);
+        el.addEventListener('mousedown', (e) => {
+            if (!unlocked || e.button !== 0) return;
+            mDrag = true;
+            mLastX = e.clientX;
+            mLastY = e.clientY;
+            el.style.cursor = 'grabbing';
+            e.preventDefault();
+            e.stopPropagation();
+            document.addEventListener('mousemove', mMove);
+            document.addEventListener('mouseup', mUp);
+        });
 
-        /* 双击进入编辑模式（触屏双击由下方 touch 逻辑处理，避免重复触发） */
         el.addEventListener('dblclick', (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -867,7 +1575,7 @@ button:active { opacity: .75; }
             setUnlocked(!unlocked);
         });
 
-        /* 移动端：锁定时只判断"轻点"；进入编辑模式后才单指平移、双指缩放 */
+        /* 移动端 */
         let tActive = false;
         let tDrag = false;
         let tPinch = false;
@@ -886,13 +1594,11 @@ button:active { opacity: .75; }
 
         const tStart = (e) => {
             if (!unlocked) {
-                // 只记录起点，不拦截任何默认行为，页面滚动照常
                 lockedStart = e.touches.length === 1
                     ? { x: e.touches[0].clientX, y: e.touches[0].clientY }
                     : null;
                 return;
             }
-
             if (e.touches.length === 2) {
                 tPinch = true;
                 tDrag = false;
@@ -923,7 +1629,7 @@ button:active { opacity: .75; }
                 if (pinchStartDist > 0) {
                     const factor = dist / pinchStartDist;
                     const newScale = clampVal(
-                        Math.round((pinchStartScale * factor) * 100) / 100,
+                        Math.round(pinchStartScale * factor * 100) / 100,
                         MIN_SCALE,
                         MAX_SCALE,
                     );
@@ -947,54 +1653,47 @@ button:active { opacity: .75; }
             e.preventDefault();
             const dx = t.clientX - tLastX;
             const dy = t.clientY - tLastY;
-            schedule(pos.x + dx, pos.y + dy, scale);
             tLastX = t.clientX;
             tLastY = t.clientY;
+            pos.x += dx;
+            pos.y += dy;
+            schedule(pos.x, pos.y, scale);
         };
 
         const tEnd = (e) => {
             lastTouchEndT = Date.now();
 
             if (!unlocked) {
-                // 只有"几乎没位移"的轻点才计入双击，滑动聊天列表不会误解锁
                 const start = lockedStart;
                 lockedStart = null;
                 if (start && e.touches.length === 0 && e.changedTouches[0]) {
                     const t = e.changedTouches[0];
-                    if (Math.hypot(t.clientX - start.x, t.clientY - start.y) <= TAP_SLOP) {
-                        registerTap();
-                    }
+                    if (Math.hypot(t.clientX - start.x, t.clientY - start.y) <= TAP_SLOP) registerTap();
                 }
                 return;
             }
 
             if (tPinch && e.touches.length < 2) {
                 tPinch = false;
-                setScale(charNameNow, scale, isUserNow);
+                setScale(nameNow, scale, isUserNow);
             }
 
             if (e.touches.length === 0) {
                 tActive = false;
                 el.style.cursor = 'grab';
-
-                if (tConsumed) {
-                    tConsumed = false;
-                    return;
-                }
-
+                if (tConsumed) { tConsumed = false; return; }
                 if (tDrag) {
                     tDrag = false;
-                    if (raf) {
-                        cancelAnimationFrame(raf);
-                        raf = 0;
+                    flushPending();
+                    const box = readBox();
+                    if (box) {
+                        const safe = clampSafePosition(pos.x, pos.y, scale, box);
+                        applyTransform(safe.x, safe.y, scale, false);
+                        setPos(nameNow, safe.x, safe.y, isUserNow);
                     }
-                    const safe = clampSafePosition(pos.x, pos.y, scale);
-                    applyTransform(safe.x, safe.y, scale);
-                    setPos(charNameNow, safe.x, safe.y, isUserNow);
                     return;
                 }
-
-                registerTap(); // 编辑模式下再次双击 = 退出
+                registerTap();
             }
         };
 
@@ -1011,40 +1710,47 @@ button:active { opacity: .75; }
         el.addEventListener('touchend', tEnd, { passive: true });
         el.addEventListener('touchcancel', tCancel, { passive: true });
 
-        /* 弹窗唤醒：桌面右键 / 移动端长按 */
+        /* 右键 / 长按 → 同一个弹窗 */
         el.addEventListener('contextmenu', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            const isLongPress = tActive;
-            if (isLongPress) tConsumed = true;
-            openVideoModal(charNameNow, isUserNow);
+            if (tActive) tConsumed = true;
+            openAvatarModal({ isUser: isUserNow, name: nameNow, label: isUserNow ? '面具' : '角色' });
         });
     }
 
-    /* ========== 6. 介质挂载与替换 ========== */
+    /* ========== 7. 介质挂载与替换 ========== */
     const isVideoSource = (info) => {
         if (!info || !info.src) return false;
         if (info.type && info.type.startsWith('video/')) return true;
-        return /\.(mp4|webm)($|\?)/i.test(info.src);
+        return /^(data:video\/|\S+\.(mp4|webm|mov)(\?|#|$))/i.test(info.src);
     };
 
     async function applyAvatar(mes, isUser) {
         if (!mes) return;
-        const charName = getStoreName(mes);
+        const storeName = getStoreName(mes);
         const t = findAvatar(mes);
         if (!t || t.mode !== 'object') return;
 
         const container = t.container;
         if (!container) return;
 
-        const mediaSource = await resolveAvatarSource(charName, !!isUser);
+        const mediaSource = await resolveAvatarSource(storeName, !!isUser);
         const existingImg = container.querySelector('img');
         const existingVideo = container.querySelector('video');
 
         if (mediaSource && mediaSource.src) {
             if (isVideoSource(mediaSource)) {
+                if (existingVideo) {
+                    if (existingVideo.getAttribute('src') !== mediaSource.src) {
+                        existingVideo.src = mediaSource.src;
+                        existingVideo.load();
+                        existingVideo.play().catch(() => { });
+                    }
+                    return;
+                }
                 if (existingImg) {
-                    container.dataset.origSrc = existingImg.src;
+                    if (!container.dataset.origSrc) container.dataset.origSrc = existingImg.src;
                     const video = document.createElement('video');
                     video.src = mediaSource.src;
                     video.autoplay = true;
@@ -1055,47 +1761,50 @@ button:active { opacity: .75; }
                     video.preload = 'auto';
                     video.className = existingImg.className;
                     video.style.cssText = existingImg.style.cssText;
+                    video.dataset.avatarCustom = '1';
                     container.replaceChild(video, existingImg);
-                    setupDrag({ el: video, mode: 'object', container }, charName, !!isUser);
+                    setupDrag({ el: video, mode: 'object', container }, storeName, !!isUser);
                     video.play().catch(() => { });
-                } else if (existingVideo && existingVideo.src !== mediaSource.src) {
-                    existingVideo.src = mediaSource.src;
-                    existingVideo.load();
-                    existingVideo.play().catch(() => { });
                 }
             } else {
                 if (existingVideo) {
                     const img = document.createElement('img');
                     img.className = existingVideo.className;
                     img.style.cssText = existingVideo.style.cssText;
+                    img.dataset.avatarCustom = '1';
                     img.src = mediaSource.src;
                     container.replaceChild(img, existingVideo);
-                    setupDrag({ el: img, mode: 'object', container }, charName, !!isUser);
+                    setupDrag({ el: img, mode: 'object', container }, storeName, !!isUser);
                 } else if (existingImg) {
                     if (!container.dataset.origSrc) container.dataset.origSrc = existingImg.src;
-                    if (existingImg.src !== mediaSource.src) existingImg.src = mediaSource.src;
+                    if (existingImg.getAttribute('src') !== mediaSource.src) {
+                        existingImg.src = mediaSource.src;
+                        existingImg.dataset.avatarCustom = '1';
+                    }
                 }
             }
-        } else if (existingVideo) {
-            const img = document.createElement('img');
-            img.className = existingVideo.className;
-            img.style.cssText = existingVideo.style.cssText;
-            img.src = container.dataset.origSrc || existingVideo.getAttribute('data-orig-src') || '';
-            container.replaceChild(img, existingVideo);
-            setupDrag({ el: img, mode: 'object', container }, charName, !!isUser);
-        } else if (existingImg && container.dataset.origSrc) {
-            existingImg.src = container.dataset.origSrc;
-            delete container.dataset.origSrc;
+        } else {
+            /* 没有任何自定义媒体：回到酒馆原生头像 */
+            if (existingVideo) {
+                const img = document.createElement('img');
+                img.className = existingVideo.className;
+                img.style.cssText = existingVideo.style.cssText;
+                const orig = container.dataset.origSrc;
+                if (orig) img.src = orig;
+                container.replaceChild(img, existingVideo);
+                setupDrag({ el: img, mode: 'object', container }, storeName, !!isUser);
+            } else if (existingImg && container.dataset.origSrc && existingImg.dataset.avatarCustom === '1') {
+                existingImg.src = container.dataset.origSrc;
+                delete existingImg.dataset.avatarCustom;
+                delete container.dataset.origSrc;
+            }
         }
     }
 
-    /* ========== 7. 批量挂载与监听 ========== */
-    /** 挂载头像：已挂过的元素只更新角色名与位移，不重复绑定事件。
-     *  关键：位移/缩放是同步从 localStorage 读的，必须在同一调用栈里写进内联样式，
-     *  不能等 applyAvatar 的异步 IndexedDB 回来——否则新楼层会先闪一帧原生头像。 */
+    /* ========== 8. 批量挂载与监听 ========== */
     function mountMessage(mes) {
-        const isUser = isUserMessage(mes);
         const name = getStoreName(mes);
+        const isUser = isUserMessage(mes);
         const t = findAvatar(mes);
         if (!t) return;
         if (t.el.dataset.dragReady && typeof t.el.__setChar === 'function') {
@@ -1103,13 +1812,10 @@ button:active { opacity: .75; }
         } else {
             setupDrag(t, name, isUser);
         }
-        /* 异步替换自定义头像源（视频/图片），不阻塞上面的同步位移 */
+        /* 异步替换自定义头像源，不阻塞上面的同步位移 */
         applyAvatar(mes, isUser);
     }
 
-    /* 带自定义 UI 的酒馆在插楼 / 重新渲染时会把头像元素整个换掉：
-       新元素既没有绑定、也没有内联尺寸，于是又回到主题默认的居中裁切，
-       看起来就像"位置被打回原样"。这里做一次防抖巡检，按已存位移重新挂回去。 */
     let sweepTimer = 0;
 
     function sweepAvatars() {
@@ -1120,10 +1826,9 @@ button:active { opacity: .75; }
             const t = findAvatar(mes);
             if (!t || !t.el) return;
             if (!t.el.dataset.dragReady || typeof t.el.__applyStoredTransform !== 'function') {
-                mountMessage(mes);   // 元素被换过：重新绑定 + 按存档位置重绘
+                mountMessage(mes);
                 return;
             }
-            // 元素还在，但内联尺寸被外部样式或重渲染冲掉了
             if (!t.el.style.width || t.el.style.width === 'auto') {
                 t.el.__setChar(getStoreName(mes), isUserMessage(mes));
             }
@@ -1160,6 +1865,7 @@ button:active { opacity: .75; }
 
     function initAll() {
         if (unlockedEl && !unlockedEl.isConnected) unlockedEl = null;
+        invalidatePersonaId();
         document.querySelectorAll('#chat .mes').forEach(mountMessage);
     }
 
@@ -1171,12 +1877,49 @@ button:active { opacity: .75; }
         return true;
     }
 
-    /* ========== 8. 生命周期 ========== */
+    /* ========== 9. 面板入口：角色头像 / 面具 Set Image ========== */
+    function openPanelModal(isUser) {
+        if (isUser) {
+            openAvatarModal({ isUser: true, name: getPersonaId(), label: '面具' });
+        } else {
+            openAvatarModal({ isUser: false, name: getCharStoreName(), label: '角色' });
+        }
+    }
+
+    function canWriteCharAvatarNow() {
+        const ctx = getCtx();
+        const ch = ctx.characters
+            ? (ctx.characters[ctx.characterId] || ctx.characters[Number(ctx.characterId)])
+            : null;
+        return !!(ch && ch.avatar && ch.avatar !== 'none');
+    }
+
+    function bindPanelEntries() {
+        /* 捕获阶段拦截：阻止酒馆自己的"选文件 → 弹原生裁剪框"流程 */
+        document.addEventListener('click', (e) => {
+            const t = e.target;
+            if (!t || !t.closest) return;
+
+            const personaBtn = t.closest('#persona_set_image_button');
+            /* 只拦角色"头像预览"这个 label。#avatar_div 里还装着导出/删除/复制/创建按钮，
+               一起拦会把整个角色面板点坏。 */
+            const charLabel = t.closest('#avatar_div_div');
+            if (!personaBtn && !charLabel) return;
+            /* 新建角色时还没有头像文件可写：交回酒馆原生流程 */
+            if (charLabel && !canWriteCharAvatarNow()) return;
+
+            e.preventDefault();
+            e.stopPropagation();
+            if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+
+            openPanelModal(!!personaBtn);
+        }, true);
+    }
+
+    /* ========== 10. 生命周期 ========== */
     const boot = () => {
         initAll();
         if (observeChat()) return;
-
-        // #chat 还没渲染出来时，等它出现再挂监听
         let tries = 0;
         const timer = setInterval(() => {
             tries += 1;
@@ -1190,22 +1933,27 @@ button:active { opacity: .75; }
             if (!ctx?.eventSource || !ctx?.eventTypes) return;
             const { eventSource, eventTypes } = ctx;
 
-            // 事件名在不同酒馆版本里可能缺失，缺了就跳过，不影响 DOM 兜底
             const onEvent = (name, handler) => {
                 const type = eventTypes[name];
                 if (!type) return;
                 eventSource.on(type, handler);
             };
 
-            onEvent('APP_READY', () => { clearAllCaches(); boot(); });
+            onEvent('APP_READY', () => { clearAllCaches(); invalidatePersonaId(); boot(); });
             onEvent('CHAT_CHANGED', () => {
                 lockAvatarEdit();
-                clearAllCaches();   // 换存档后旧缓存必须失效，否则串档
+                clearAllCaches();
+                invalidatePersonaId();
                 initAll();
             });
             onEvent('CHARACTER_SELECTED', () => {
                 lockAvatarEdit();
-                clearAllCaches();   // 换角色后清缓存
+                clearAllCaches();
+                initAll();
+            });
+            onEvent('PERSONA_CHANGED', () => {
+                clearAllCaches();
+                invalidatePersonaId();
                 initAll();
             });
         } catch (e) {
@@ -1215,12 +1963,12 @@ button:active { opacity: .75; }
 
     function start() {
         bindUnlockGuards();
+        bindPanelEntries();
         boot();
         bindStEvents();
-        // 窗口尺寸变化后头像框尺寸也会变，重新按存档位移重绘一次
         window.addEventListener('resize', scheduleSweep);
         window.addEventListener('load', scheduleSweep, { once: true });
-        console.log('%c[ST Avatar+] 1.6.1 面具独立 · 恢复原生 · 高清无闪烁', 'color:#4a90e2;font-weight:bold');
+        console.log('%c[ST Avatar+] v1.7.1 裁剪+动态头像合并版（原生头像同步 / 位置不回弹）', 'color:#4a90e2;font-weight:bold');
     }
 
     if (document.readyState === 'loading') {
@@ -1229,19 +1977,29 @@ button:active { opacity: .75; }
         start();
     }
 
-    /* ========== 9. 对外接口 ========== */
+    /* ========== 11. 对外接口 ========== */
     window.STAvatar = {
-        setVideo: (charName, url, isUser) => {
-            setVideoUrl(charName, url, !!isUser);
+        open: (isUser) => openPanelModal(!!isUser),
+        setVideo: (name, url, isUser) => {
+            setVideoUrl(name, url, !!isUser);
             clearAllCaches();
             initAll();
         },
-        resetPos: (charName, isUser) => {
-            setPos(charName, 0, 0, !!isUser);
-            setScale(charName, MIN_SCALE, !!isUser);
+        resetPos: (name, isUser) => {
+            setPos(name, 0, 0, !!isUser);
+            setScale(name, MIN_SCALE, !!isUser);
             clearAllCaches();
             initAll();
         },
+        restoreNative: async (name, isUser) => {
+            const k = makeKey(name, !!isUser);
+            await deleteLocalFile(k);
+            setVideoUrl(name, '', !!isUser);
+            clearAllCaches();
+            initAll();
+        },
+        writeNative: (blob, isUser, name) => writeNativeAvatar(!!isUser, name, blob),
+        personaId: () => getPersonaId(),
         listVideos: () => load(VIDEO_KEY),
         listPositions: () => load(POS_KEY),
         listScales: () => load(SCALE_KEY),
