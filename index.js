@@ -1,6 +1,6 @@
 /* ============================================================
  * SillyTavern 扩展：头像裁剪 + 动态头像（合并版）
- * nico-st-avatar-plus v1.7.3
+ * nico-st-avatar-plus v1.7.4
  *
  * v1.4.0 双击进入拖动模式，默认锁定，杜绝误触
  * v1.5.0 原生头像同引擎 + 按最终像素重绘（放大不糊）+ 重渲染巡检
@@ -1367,6 +1367,9 @@ button:active { opacity: .78; }
         if (getComputedStyle(container).position === 'static') {
             container.style.position = 'relative';
         }
+        /* 手机端长按不要弹系统"存储图片"菜单，长按归我们 */
+        el.style.webkitTouchCallout = 'none';
+        el.style.webkitUserSelect = 'none';
 
         let nameNow = storeName;
         let isUserNow = !!isUser;
@@ -1683,9 +1686,11 @@ button:active { opacity: .78; }
                 lockedStart = e.touches.length === 1
                     ? { x: e.touches[0].clientX, y: e.touches[0].clientY }
                     : null;
+                if (e.touches.length === 1) startLongPress();
                 return;
             }
             if (e.touches.length === 2) {
+                clearLongPress();
                 tPinch = true;
                 tDrag = false;
                 tActive = true;
@@ -1703,6 +1708,7 @@ button:active { opacity: .78; }
                 tDrag = false;
                 tPinch = false;
                 tConsumed = false;
+                startLongPress();
             }
         };
 
@@ -1729,9 +1735,11 @@ button:active { opacity: .78; }
 
             if (!tDrag) {
                 if (Math.hypot(t.clientX - tStartX, t.clientY - tStartY) > DRAG_THRESHOLD) {
+                    clearLongPress();
                     tDrag = true;
                     el.style.cursor = 'grabbing';
                 } else {
+                    if (Math.hypot(t.clientX - tStartX, t.clientY - tStartY) > 8) clearLongPress();
                     return;
                 }
             }
@@ -1748,10 +1756,12 @@ button:active { opacity: .78; }
 
         const tEnd = (e) => {
             lastTouchEndT = Date.now();
+            clearLongPress();
 
             if (!unlocked) {
                 const start = lockedStart;
                 lockedStart = null;
+                if (tConsumed) { tConsumed = false; return; }
                 if (start && e.touches.length === 0 && e.changedTouches[0]) {
                     const t = e.changedTouches[0];
                     if (Math.hypot(t.clientX - start.x, t.clientY - start.y) <= TAP_SLOP) registerTap();
@@ -1784,6 +1794,7 @@ button:active { opacity: .78; }
         };
 
         const tCancel = () => {
+            clearLongPress();
             tActive = false;
             tDrag = false;
             tPinch = false;
@@ -1791,12 +1802,30 @@ button:active { opacity: .78; }
             lockedStart = null;
         };
 
+        /* 长按 520ms 不动 → 打开同一个弹窗（手机浏览器不会给图片发 contextmenu） */
+        let lpTimer = 0;
+        const clearLongPress = () => {
+            if (lpTimer) { clearTimeout(lpTimer); lpTimer = 0; }
+        };
+        const startLongPress = () => {
+            clearLongPress();
+            lpTimer = setTimeout(() => {
+                lpTimer = 0;
+                tConsumed = true;
+                tActive = false;
+                tDrag = false;
+                lockedStart = null;
+                openAvatarModal({ isUser: isUserNow, name: nameNow, label: isUserNow ? '面具' : '角色' });
+            }, 520);
+        };
+
         el.addEventListener('touchstart', tStart, { passive: true });
         el.addEventListener('touchmove', tMove, { passive: false });
         el.addEventListener('touchend', tEnd, { passive: true });
         el.addEventListener('touchcancel', tCancel, { passive: true });
 
-        /* 右键 / 长按 → 同一个弹窗 */
+        /* 右键 → 同一个弹窗（聊天区的右键统一在 bindPanelEntries 里用捕获阶段接管，
+           这里只兜住元素自身的右键，避免被别的扩展吃掉） */
         el.addEventListener('contextmenu', (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -2000,6 +2029,27 @@ button:active { opacity: .78; }
 
             openPanelModal(!!personaBtn);
         }, true);
+
+        /* 聊天头像右键：在捕获阶段就接管，别的扩展（消息右键菜单、快捷命令）抢不走 */
+        document.addEventListener('contextmenu', (e) => {
+            const t = e.target;
+            if (!t || !t.closest) return;
+            const mes = t.closest('#chat .mes');
+            if (!mes) return;
+            const av = t.closest('.avatar, .mesAvatarWrapper');
+            if (!av) return;
+
+            e.preventDefault();
+            if (e.stopPropagation) e.stopPropagation();
+            if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+
+            const isUser = isUserMessage(mes);
+            openAvatarModal({
+                isUser,
+                name: getStoreName(mes),
+                label: isUser ? '面具' : '角色',
+            });
+        }, true);
     }
 
     /* ========== 10. 生命周期 ========== */
@@ -2054,7 +2104,7 @@ button:active { opacity: .78; }
         bindStEvents();
         window.addEventListener('resize', scheduleSweep);
         window.addEventListener('load', scheduleSweep, { once: true });
-        console.log('%c[ST Avatar+] v1.7.3 裁剪+动态头像合并版（原生头像同步 / 位置不回弹）', 'color:#f2f2f3;font-weight:bold');
+        console.log('%c[ST Avatar+] v1.7.4 裁剪+动态头像合并版（原生头像同步 / 位置不回弹）', 'color:#f2f2f3;font-weight:bold');
     }
 
     if (document.readyState === 'loading') {
