@@ -6,7 +6,7 @@
  * v1.5.0 原生头像同引擎 + 按最终像素重绘（放大不糊）+ 重渲染巡检
  * v1.6.0 面具/存档完全独立 + 本地缓存 + 新楼层不再闪原始头像
  * v1.7.0 ★ 合并 avatar-cropper：点角色/面具头像即可选本机图片或视频
- *        ★ 图片按 2:3 裁剪后【写入酒馆原生头像】，不再出现"侧栏一套、聊天一套"
+ *        ★ 图片先自由框选裁剪，再【写入酒馆原生头像】，不再出现"侧栏一套、聊天一套"
  *        ★ 恢复存档位置时不再重新 clamp（修掉"位置被打回原位"的老毛病）
  *        ★ "恢复原生头像"与"重置位置与缩放"分离
  *        ★ 面板入口：角色界面头像、面具界面 Set Image 按钮
@@ -20,7 +20,7 @@
  * v1.7.3 ★ 弹窗按 visualViewport 实测尺寸钉在可视区域（手机缩放/主题 transform/地址栏伸缩
  *          都不再把卡片顶出屏幕）；卡片高度按实测可用高度收口
  * v1.7.4 ★ 聊天头像支持长按（520ms）与右键（捕获阶段）打开面板，不被其他扩展抢走
- * v1.7.5 ★ 裁剪选区四条边也能拖（固定对边、保持 2:3，另一维以选区中心对称展开）
+ * v1.7.5 ★ 裁剪选区四条边也能拖（自由拖动，拉左右边时上下边不动，不锁比例）
  *        ★ 面板黑白质感再升一档（更深黑底、发丝边框、细把手、白色主按钮高光）
  *        ★ 头像位移/尺寸改用 important 写入，任何主题的 !important 尺寸锁都压不住
  *
@@ -751,7 +751,7 @@ button:active { opacity: .78; }
         <svg viewBox="0 0 24 24"><path d="M12 15V3m0 0L8 7m4-4l4 4"/><path d="M3 15v3a2 2 0 002 2h14a2 2 0 002-2v-3"/></svg>
         <span class="picker-txt">
           <span class="picker-t">选择本机图片或视频</span>
-          <span class="picker-s">图片自动裁成 2:3 写入原生头像 · 视频作为动态头像</span>
+          <span class="picker-s">图片进入裁剪页（自由框选）写入原生头像 · 视频作为动态头像</span>
         </span>
       </button>
       <input id="fileInput" type="file" accept="image/*,video/*" style="display:none">
@@ -782,7 +782,7 @@ button:active { opacity: .78; }
   <div class="card cropcard" id="cropPage" style="display:none">
     <div class="head">
       <span class="badge badge--n">裁剪</span>
-      <span class="name">2:3 头像 · 拖动框选保留区域</span>
+      <span class="name">拖动选区或四条边，框住要保留的区域</span>
       <button class="iconbtn" id="closeCrop" title="关闭">&times;</button>
     </div>
     <div class="content">
@@ -939,52 +939,37 @@ button:active { opacity: .78; }
                 return;
             }
 
-            /* 四条边：固定对边，保持 2:3；另一维以选区中心为轴向两侧对称展开，
-               夹在图片框内 —— 手感上就是"拉边"，不会因为锁比例而跳变。 */
-            const edge = crop.mode;
-            if (edge === 'n' || edge === 'e' || edge === 's' || edge === 'w') {
-                const R = AV_H_PER_W;
-                if (edge === 'e' || edge === 'w') {
-                    const ax = edge === 'w' ? s.x + s.w : s.x;
-                    const availW = edge === 'w' ? (ax - b.x) : (b.x + b.w - ax);
-                    let w = edge === 'w' ? (ax - p.x) : (p.x - ax);
-                    w = Math.max(crop.min, Math.min(w, availW, b.w, b.h / R));
-                    const h = w * R;
-                    const nx = edge === 'w' ? ax - w : ax;
-                    const cy = s.y + s.h / 2;
-                    const ny = clampVal(cy - h / 2, b.y, b.y + b.h - h);
-                    crop.r = { x: nx, y: ny, w, h };
-                } else {
-                    const ay = edge === 'n' ? s.y + s.h : s.y;
-                    const availH = edge === 'n' ? (ay - b.y) : (b.y + b.h - ay);
-                    let h = edge === 'n' ? (ay - p.y) : (p.y - ay);
-                    h = Math.max(crop.min * R, Math.min(h, availH, b.h, b.w * R));
-                    const w = h / R;
-                    const ny = edge === 'n' ? ay - h : ay;
-                    const cx = s.x + s.w / 2;
-                    const nx = clampVal(cx - w / 2, b.x, b.x + b.w - w);
-                    crop.r = { x: nx, y: ny, w, h };
-                }
-                paintSel();
-                return;
+            /* 自由拖动：只改被拖动的那条边（角则两条边），其余边一律原地不动，
+               不锁比例 —— 拉左右边时上下边绝对不跟着动。 */
+            let x = s.x;
+            let y = s.y;
+            let w = s.w;
+            let h = s.h;
+            const minW = Math.min(crop.min, b.w);
+            const minH = Math.min(crop.min, b.h);
+
+            if (crop.mode.indexOf('w') >= 0) {
+                const right = s.x + s.w;
+                x = clampVal(p.x, b.x, right - minW);
+                w = right - x;                       // 右边固定
+            }
+            if (crop.mode.indexOf('e') >= 0) {
+                const left = s.x;
+                w = clampVal(p.x - left, minW, b.x + b.w - left);   // 左边固定
+                x = left;
+            }
+            if (crop.mode.indexOf('n') >= 0) {
+                const bottom = s.y + s.h;
+                y = clampVal(p.y, b.y, bottom - minH);
+                h = bottom - y;                      // 下边固定
+            }
+            if (crop.mode.indexOf('s') >= 0) {
+                const top = s.y;
+                h = clampVal(p.y - top, minH, b.y + b.h - top);     // 上边固定
+                y = top;
             }
 
-            /* 四角缩放：对角固定，保持 2:3 */
-            const dirW = crop.mode.indexOf('w') >= 0;
-            const dirN = crop.mode.indexOf('n') >= 0;
-            const ax = dirW ? s.x + s.w : s.x;          // 锚点
-            const ay = dirN ? s.y + s.h : s.y;
-
-            let w = Math.abs(p.x - ax);
-            const availW = dirW ? (ax - b.x) : (b.x + b.w - ax);
-            const availH = dirN ? (ay - b.y) : (b.y + b.h - ay);
-            w = Math.min(w, availW, availH / AV_H_PER_W);
-            w = Math.max(crop.min, Math.min(w, b.w, b.h / AV_H_PER_W));
-
-            const h = w * AV_H_PER_W;
-            const nx = dirW ? ax - w : ax;
-            const ny = dirN ? ay - h : ay;
-            crop.r = { x: nx, y: ny, w, h };
+            crop.r = { x, y, w, h };
             paintSel();
         });
 
@@ -1018,7 +1003,7 @@ button:active { opacity: .78; }
             cropPage.style.display = '';
         }
 
-        /* 按选区导出 2:3 PNG（不放大，源像素取整避免亚像素发虚） */
+        /* 按选区真实比例导出 PNG（不放大，源像素取整避免亚像素发虚） */
         function exportCrop() {
             return new Promise((resolve) => {
                 const b = crop.box;
@@ -1037,8 +1022,11 @@ button:active { opacity: .78; }
                 if (sx + sw > crop.nat.w) sw = crop.nat.w - sx;
                 if (sy + sh > crop.nat.h) sh = crop.nat.h - sy;
 
-                const outH = Math.max(AV_MIN_H, Math.min(AV_MAX_H, sh));
-                const outW = Math.round(outH / AV_H_PER_W);
+                /* 保持选区比例；长边上限 2048，绝不放大（放大只会变糊） */
+                const longSide = Math.max(sw, sh);
+                const k = Math.min(1, AV_MAX_H / longSide);
+                const outW = Math.max(1, Math.round(sw * k));
+                const outH = Math.max(1, Math.round(sh * k));
 
                 const c = document.createElement('canvas');
                 c.width = outW;
