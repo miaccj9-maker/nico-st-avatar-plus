@@ -6,7 +6,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "nico2",
-    "version": "1.7.2",
+    "version": "1.7.3",
     "homePage": "https://github.com/miaccj9-maker/nico-st-avatar-plus",
     "description": "头像自由拖动/缩放 + 动态视频头像 + 2:3 裁剪写入酒馆原生头像（侧栏、角色列表、手机端同步，不再两套头像）；点角色/面具头像即可选本机图片或视频；面具与存档按唯一 ID 独立；新楼层零回弹；恢复原生与重置位置分离。"
 }

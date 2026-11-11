@@ -1,6 +1,6 @@
 /* ============================================================
  * SillyTavern 扩展：头像裁剪 + 动态头像（合并版）
- * nico-st-avatar-plus v1.7.2
+ * nico-st-avatar-plus v1.7.3
  *
  * v1.4.0 双击进入拖动模式，默认锁定，杜绝误触
  * v1.5.0 原生头像同引擎 + 按最终像素重绘（放大不糊）+ 重渲染巡检
@@ -17,6 +17,8 @@
  * v1.7.2 ★ 弹窗改为极简黑白（无彩色 accent，白色主按钮）
  *        ★ 高度自适应：max-height 用 dvh + 内容区独立滚动，矮屏/手机不再溢出
  *        ★ 底部改为"次要按钮一行 + 应用整行"，窄屏不挤不换行
+ * v1.7.3 ★ 弹窗按 visualViewport 实测尺寸钉在可视区域（手机缩放/主题 transform/地址栏伸缩
+ *          都不再把卡片顶出屏幕）；卡片高度按实测可用高度收口
  *
  * 存储键（不改名，兼容历史数据）：
  *   st_avatar_video_urls / st_avatar_positions / st_avatar_scales
@@ -548,7 +550,7 @@
 
         modalHost = document.createElement('div');
         modalHost.id = 'st-avatar-plus-modal';
-        modalHost.style.cssText = 'position:fixed;inset:0;z-index:2147483000;pointer-events:none;display:none;';
+        modalHost.style.cssText = 'position:fixed;left:0;top:0;width:100%;height:100%;z-index:2147483000;pointer-events:none;display:none;';
         (document.documentElement || document.body).appendChild(modalHost);
 
         const shadow = modalHost.attachShadow({ mode: 'open' });
@@ -559,7 +561,7 @@
 .overlay {
     position: absolute; inset: 0;
     display: flex; align-items: center; justify-content: center;
-    padding: 12px; pointer-events: auto;
+    padding: 10px; pointer-events: auto;
     background: rgba(0, 0, 0, .74);
     -webkit-backdrop-filter: blur(16px);
     backdrop-filter: blur(16px);
@@ -1206,12 +1208,69 @@ button:active { opacity: .78; }
 
         /* 面板尺寸变化时重算裁剪布局 */
         window.addEventListener('resize', () => {
-            if (modalHost.style.display !== 'none' && cropPage.style.display !== 'none') {
-                layoutCrop();
-            }
+            if (modalHost.style.display === 'none') return;
+            fitModalToViewport();
+            if (cropPage.style.display !== 'none') layoutCrop();
         });
+        window.addEventListener('orientationchange', () => setTimeout(fitModalToViewport, 120));
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', () => {
+                if (modalHost.style.display === 'none') return;
+                fitModalToViewport();
+                if (cropPage.style.display !== 'none') layoutCrop();
+            });
+        }
 
         return modalHost;
+    }
+
+    /* 把弹窗钉到"真正能看见"的可视区域（visualViewport）：
+       手机浏览器缩放、主题给祖先加 transform、地址栏伸缩时，单纯 inset:0 会让
+       蒙版比屏幕更大 → 卡片居中就被顶出屏幕。这里按实测尺寸校正。 */
+    function fitModalToViewport() {
+        if (!modalHost) return;
+        const vv = window.visualViewport;
+        let vw = Math.round(vv ? vv.width : window.innerWidth);
+        let vh = Math.round(vv ? vv.height : window.innerHeight);
+        const ox = Math.round(vv ? vv.offsetLeft : 0);
+        const oy = Math.round(vv ? vv.offsetTop : 0);
+        if (!vw || !vh) return;
+
+        modalHost.style.position = 'fixed';
+        modalHost.style.right = 'auto';
+        modalHost.style.bottom = 'auto';
+        modalHost.style.left = ox + 'px';
+        modalHost.style.top = oy + 'px';
+        modalHost.style.width = vw + 'px';
+        modalHost.style.height = vh + 'px';
+
+        /* 两轮实测校正：祖先 transform / 浏览器 zoom 会让 fixed 尺寸对不上 */
+        let k = 1;
+        for (let i = 0; i < 2; i++) {
+            const r = modalHost.getBoundingClientRect();
+            if (!r.width || !r.height) break;
+            k = r.width / vw;
+            const dx = r.left - ox;
+            const dy = r.top - oy;
+            if (Math.abs(dx) < 1.5 && Math.abs(dy) < 1.5 && Math.abs(k - 1) < 0.02) break;
+            if (Math.abs(k - 1) >= 0.02) {
+                modalHost.style.width = Math.round(vw / k) + 'px';
+                modalHost.style.height = Math.round(vh / k) + 'px';
+            }
+            modalHost.style.left = Math.round(ox - dx / (k || 1)) + 'px';
+            modalHost.style.top = Math.round(oy - dy / (k || 1)) + 'px';
+        }
+
+        /* 卡片高度按实测可用高度收口，保证头尾永远在屏内 */
+        const shadow = modalHost.shadowRoot;
+        if (!shadow) return;
+        const avail = Math.floor(vh / (k || 1));
+        ['pickPage', 'cropPage'].forEach((id) => {
+            const el = shadow.getElementById(id);
+            if (el) el.style.maxHeight = Math.max(180, avail - 20) + 'px';
+        });
+        const stage = shadow.getElementById('stage');
+        if (stage) stage.style.height = Math.max(140, Math.min(380, Math.round(avail * 0.46))) + 'px';
     }
 
     async function openAvatarModal(target) {
@@ -1237,6 +1296,7 @@ button:active { opacity: .78; }
         $('chip').style.display = 'none';
 
         modalHost.style.display = 'block';
+        fitModalToViewport();
         await refreshModalState();
 
         /* 页面刚启动时面具面板可能还没渲染：稍等再解析一次唯一 ID */
@@ -1994,7 +2054,7 @@ button:active { opacity: .78; }
         bindStEvents();
         window.addEventListener('resize', scheduleSweep);
         window.addEventListener('load', scheduleSweep, { once: true });
-        console.log('%c[ST Avatar+] v1.7.2 裁剪+动态头像合并版（原生头像同步 / 位置不回弹）', 'color:#f2f2f3;font-weight:bold');
+        console.log('%c[ST Avatar+] v1.7.3 裁剪+动态头像合并版（原生头像同步 / 位置不回弹）', 'color:#f2f2f3;font-weight:bold');
     }
 
     if (document.readyState === 'loading') {
