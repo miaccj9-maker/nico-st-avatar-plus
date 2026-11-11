@@ -1,6 +1,6 @@
 /* ============================================================
  * SillyTavern 扩展：头像裁剪 + 动态头像（合并版）
- * nico-st-avatar-plus v1.7.4
+ * nico-st-avatar-plus v1.7.5
  *
  * v1.4.0 双击进入拖动模式，默认锁定，杜绝误触
  * v1.5.0 原生头像同引擎 + 按最终像素重绘（放大不糊）+ 重渲染巡检
@@ -19,6 +19,10 @@
  *        ★ 底部改为"次要按钮一行 + 应用整行"，窄屏不挤不换行
  * v1.7.3 ★ 弹窗按 visualViewport 实测尺寸钉在可视区域（手机缩放/主题 transform/地址栏伸缩
  *          都不再把卡片顶出屏幕）；卡片高度按实测可用高度收口
+ * v1.7.4 ★ 聊天头像支持长按（520ms）与右键（捕获阶段）打开面板，不被其他扩展抢走
+ * v1.7.5 ★ 裁剪选区四条边也能拖（固定对边、保持 2:3，另一维以选区中心对称展开）
+ *        ★ 面板黑白质感再升一档（更深黑底、发丝边框、细把手、白色主按钮高光）
+ *        ★ 头像位移/尺寸改用 important 写入，任何主题的 !important 尺寸锁都压不住
  *
  * 存储键（不改名，兼容历史数据）：
  *   st_avatar_video_urls / st_avatar_positions / st_avatar_scales
@@ -572,11 +576,11 @@
     width: min(100%, 420px);
     max-height: min(88vh, calc(100dvh - 24px));
     display: flex; flex-direction: column; overflow: hidden;
-    background: linear-gradient(180deg, #17171a 0%, #0d0d10 100%);
-    border: 1px solid rgba(255, 255, 255, .10);
-    border-radius: 20px;
-    box-shadow: 0 30px 70px rgba(0, 0, 0, .65), 0 1px 0 rgba(255, 255, 255, .06) inset;
-    padding: 16px 16px 14px;
+    background: linear-gradient(180deg, #1b1b1d 0%, #0d0d0f 58%, #08080a 100%);
+    border: 1px solid rgba(255, 255, 255, .11);
+    border-radius: 22px;
+    box-shadow: 0 46px 96px rgba(0, 0, 0, .72), 0 1px 0 rgba(255, 255, 255, .05) inset;
+    padding: 18px 18px 16px;
     color: #ededed;
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Segoe UI", system-ui, sans-serif;
     font-size: 14px;
@@ -591,17 +595,18 @@
 }
 .content::-webkit-scrollbar { width: 4px; }
 .content::-webkit-scrollbar-thumb { background: rgba(255,255,255,.16); border-radius: 4px; }
-.head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex: 0 0 auto; }
+.head { display: flex; align-items: center; gap: 9px; margin-bottom: 14px; flex: 0 0 auto; }
 .badge {
-    font-size: 11px; line-height: 1; padding: 5px 9px; border-radius: 999px;
-    font-weight: 600; letter-spacing: .04em; white-space: nowrap;
+    font-size: 10.5px; line-height: 1; padding: 5px 9px; border-radius: 999px;
+    font-weight: 600; letter-spacing: .08em; white-space: nowrap;
     border: 1px solid transparent;
 }
-.badge--c { background: #f4f4f4; color: #101012; border-color: #f4f4f4; }
-.badge--u { background: rgba(255,255,255,.10); color: #e8e8ea; border-color: rgba(255,255,255,.24); }
-.badge--n { background: transparent; color: #8d8d92; border-color: rgba(255,255,255,.16); }
+.badge--c { background: #ffffff; color: #0a0a0b; border-color: #ffffff; }
+.badge--u { background: transparent; color: #e2e2e5; border-color: rgba(255,255,255,.34); }
+.badge--n { background: transparent; color: #7b7b80; border-color: rgba(255,255,255,.14); }
 .name {
-    flex: 1; min-width: 0; font-size: 12.5px; font-weight: 500; color: #a6a6ab;
+    flex: 1; min-width: 0; font-size: 12px; font-weight: 500; color: #8f8f95;
+    letter-spacing: .01em;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .iconbtn {
@@ -613,31 +618,31 @@
 }
 .iconbtn:hover { background: rgba(255,255,255,.08); color: #fff; border-color: rgba(255,255,255,.26); }
 .picker {
-    width: 100%; display: flex; align-items: center; gap: 12px;
-    padding: 15px 14px; border-radius: 14px; cursor: pointer;
-    border: 1px dashed rgba(255,255,255,.26);
-    background: rgba(255,255,255,.045);
+    width: 100%; display: flex; align-items: center; gap: 13px;
+    padding: 16px 15px; border-radius: 15px; cursor: pointer;
+    border: 1px solid rgba(255,255,255,.11);
+    background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.028));
     color: #f2f2f3; text-align: left; font: inherit;
     -webkit-tap-highlight-color: transparent;
     transition: background .15s ease, border-color .15s ease;
 }
-.picker:hover { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.42); }
+.picker:hover { background: rgba(255,255,255,.075); border-color: rgba(255,255,255,.26); }
 .picker:active { transform: scale(.995); }
-.picker svg { flex: 0 0 auto; width: 20px; height: 20px; stroke: #f2f2f3; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.picker-txt { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.picker-t { font-size: 14px; font-weight: 600; color: #f4f4f5; letter-spacing: .01em; }
-.picker-s { font-size: 11.5px; color: #86868b; line-height: 1.4; }
-.or { display: flex; align-items: center; gap: 10px; margin: 15px 0 11px; }
-.or::before, .or::after { content: ""; flex: 1; height: 1px; background: rgba(255,255,255,.09); }
-.or span { font-size: 11px; color: #6f6f74; letter-spacing: .06em; }
+.picker svg { flex: 0 0 auto; width: 19px; height: 19px; stroke: #ffffff; fill: none; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.picker-txt { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.picker-t { font-size: 13.5px; font-weight: 600; color: #f7f7f8; letter-spacing: .015em; }
+.picker-s { font-size: 11px; color: #85858b; line-height: 1.45; }
+.or { display: flex; align-items: center; gap: 10px; margin: 16px 0 11px; }
+.or::before, .or::after { content: ""; flex: 1; height: 1px; background: rgba(255,255,255,.075); }
+.or span { font-size: 10.5px; color: #66666b; letter-spacing: .1em; }
 .url {
-    width: 100%; padding: 12px 13px; border-radius: 12px;
-    border: 1px solid rgba(255,255,255,.13); background: rgba(255,255,255,.045);
-    color: #f2f2f3; font: inherit; outline: none;
+    width: 100%; padding: 13px 14px; border-radius: 13px;
+    border: 1px solid rgba(255,255,255,.10); background: rgba(255,255,255,.035);
+    color: #f2f2f3; font: inherit; font-size: 13px; outline: none;
     transition: border-color .15s ease, background .15s ease;
 }
-.url::placeholder { color: #6a6a6f; }
-.url:focus { border-color: rgba(255,255,255,.42); background: rgba(255,255,255,.07); }
+.url::placeholder { color: #616166; }
+.url:focus { border-color: rgba(255,255,255,.34); background: rgba(255,255,255,.06); }
 .state {
     margin-top: 12px; font-size: 11.5px; color: #86868b;
     display: flex; align-items: center; gap: 7px;
@@ -667,14 +672,15 @@ button {
 }
 button:active { opacity: .78; }
 .primary {
-    width: 100%; background: #f7f7f8; color: #101012; border-color: #f7f7f8;
-    box-shadow: 0 8px 22px rgba(0, 0, 0, .45);
+    width: 100%; background: linear-gradient(180deg, #ffffff, #ececee); color: #0a0a0b;
+    border-color: #ffffff; border-radius: 13px; letter-spacing: .02em;
+    box-shadow: 0 10px 26px rgba(0, 0, 0, .5), 0 1px 0 rgba(255,255,255,.9) inset;
 }
-.primary:hover { background: #fff; }
-.cancel { flex: 1 1 0; background: rgba(255,255,255,.06); border-color: rgba(255,255,255,.10); color: #b6b6ba; padding: 10px 8px; }
-.cancel:hover { background: rgba(255,255,255,.10); }
-.ghost  { flex: 1 1 0; background: transparent; border-color: rgba(255,255,255,.14); color: #9c9ca1; font-weight: 500; padding: 10px 8px; }
-.ghost:hover { background: rgba(255,255,255,.06); color: #e6e6e8; }
+.primary:hover { background: #ffffff; }
+.cancel { flex: 1 1 0; background: rgba(255,255,255,.055); border-color: rgba(255,255,255,.11); color: #aeaeb3; padding: 10px 8px; letter-spacing: .02em; }
+.cancel:hover { background: rgba(255,255,255,.09); }
+.ghost  { flex: 1 1 0; background: transparent; border-color: rgba(255,255,255,.13); color: #9a9aa0; font-weight: 500; padding: 10px 8px; letter-spacing: .02em; }
+.ghost:hover { background: rgba(255,255,255,.055); color: #e6e6e8; }
 .subrow { display: flex; justify-content: center; margin-top: 10px; }
 .linkbtn {
     border: none; background: none; color: #75757a; font: inherit; font-size: 11.5px;
@@ -686,7 +692,7 @@ button:active { opacity: .78; }
 .cropcard { padding: 16px; }
 .cropwrap {
     position: relative; width: 100%; border-radius: 14px; overflow: hidden;
-    background: #0a0a0b; border: 1px solid rgba(255,255,255,.08);
+    background: #050506; border: 1px solid rgba(255,255,255,.09);
 }
 .stage { position: relative; width: 100%; height: min(44vh, 380px); touch-action: none; }
 .stage img {
@@ -694,26 +700,43 @@ button:active { opacity: .78; }
     image-rendering: auto;
 }
 .sel {
-    position: absolute; border: 1px solid rgba(255,255,255,.92);
-    box-shadow: 0 0 0 9999px rgba(0,0,0,.66);
+    position: absolute;
+    border: 1px solid rgba(255,255,255,.9);
+    box-shadow: 0 0 0 9999px rgba(0,0,0,.68);
     cursor: move;
+    border-radius: 2px;
 }
 .sel::after {
     content: ""; position: absolute; inset: 0;
     background:
-        linear-gradient(to right, rgba(255,255,255,.30) 1px, transparent 1px) 0 0 / 33.333% 100%,
-        linear-gradient(to bottom, rgba(255,255,255,.30) 1px, transparent 1px) 0 0 / 100% 33.333%;
-    opacity: .9; pointer-events: none;
+        linear-gradient(to right, rgba(255,255,255,.26) 1px, transparent 1px) 0 0 / 33.333% 100%,
+        linear-gradient(to bottom, rgba(255,255,255,.26) 1px, transparent 1px) 0 0 / 100% 33.333%;
+    opacity: .85; pointer-events: none;
 }
+/* 八个把手：四角小方块 + 四边细长条，外观克制，点按热区比视觉大 */
 .handle {
-    position: absolute; width: 16px; height: 16px; border-radius: 4px;
-    background: #fff; border: 1px solid rgba(0,0,0,.45);
-    box-shadow: 0 2px 8px rgba(0,0,0,.5);
+    position: absolute; width: 30px; height: 30px; padding: 0; border: 0;
+    background: transparent; box-shadow: none; display: flex;
+    align-items: center; justify-content: center; touch-action: none;
 }
-.handle[data-h="nw"] { left: -8px; top: -8px; cursor: nwse-resize; }
-.handle[data-h="ne"] { right: -8px; top: -8px; cursor: nesw-resize; }
-.handle[data-h="sw"] { left: -8px; bottom: -8px; cursor: nesw-resize; }
-.handle[data-h="se"] { right: -8px; bottom: -8px; cursor: nwse-resize; }
+.handle::after {
+    content: ""; display: block; background: #ffffff; border-radius: 2px;
+    box-shadow: 0 1px 5px rgba(0,0,0,.55);
+}
+.handle[data-h="nw"], .handle[data-h="ne"], .handle[data-h="sw"], .handle[data-h="se"] { width: 22px; height: 22px; }
+.handle[data-h="nw"]::after, .handle[data-h="ne"]::after,
+.handle[data-h="sw"]::after, .handle[data-h="se"]::after { width: 13px; height: 13px; border-radius: 3px; }
+.handle[data-h="nw"] { left: -11px; top: -11px; cursor: nwse-resize; }
+.handle[data-h="ne"] { right: -11px; top: -11px; cursor: nesw-resize; }
+.handle[data-h="sw"] { left: -11px; bottom: -11px; cursor: nesw-resize; }
+.handle[data-h="se"] { right: -11px; bottom: -11px; cursor: nwse-resize; }
+.handle[data-h="n"] { top: -15px; left: 50%; transform: translateX(-50%); cursor: ns-resize; }
+.handle[data-h="s"] { bottom: -15px; left: 50%; transform: translateX(-50%); cursor: ns-resize; }
+.handle[data-h="e"] { right: -15px; top: 50%; transform: translateY(-50%); cursor: ew-resize; }
+.handle[data-h="w"] { left: -15px; top: 50%; transform: translateY(-50%); cursor: ew-resize; }
+.handle[data-h="n"]::after, .handle[data-h="s"]::after { width: 26px; height: 3px; border-radius: 2px; }
+.handle[data-h="e"]::after, .handle[data-h="w"]::after { width: 3px; height: 26px; border-radius: 2px; }
+.handle:active::after { background: #fff; box-shadow: 0 0 0 3px rgba(255,255,255,.22); }
 </style>
 <div class="overlay">
   <div class="card" id="pickPage">
@@ -771,6 +794,10 @@ button:active { opacity: .78; }
             <div class="handle" data-h="ne"></div>
             <div class="handle" data-h="sw"></div>
             <div class="handle" data-h="se"></div>
+            <div class="handle" data-h="n"></div>
+            <div class="handle" data-h="e"></div>
+            <div class="handle" data-h="s"></div>
+            <div class="handle" data-h="w"></div>
           </div>
         </div>
       </div>
@@ -908,6 +935,36 @@ button:active { opacity: .78; }
                 let nx = clampVal(s.x + dx, b.x, b.x + b.w - s.w);
                 let ny = clampVal(s.y + dy, b.y, b.y + b.h - s.h);
                 crop.r = { x: nx, y: ny, w: s.w, h: s.h };
+                paintSel();
+                return;
+            }
+
+            /* 四条边：固定对边，保持 2:3；另一维以选区中心为轴向两侧对称展开，
+               夹在图片框内 —— 手感上就是"拉边"，不会因为锁比例而跳变。 */
+            const edge = crop.mode;
+            if (edge === 'n' || edge === 'e' || edge === 's' || edge === 'w') {
+                const R = AV_H_PER_W;
+                if (edge === 'e' || edge === 'w') {
+                    const ax = edge === 'w' ? s.x + s.w : s.x;
+                    const availW = edge === 'w' ? (ax - b.x) : (b.x + b.w - ax);
+                    let w = edge === 'w' ? (ax - p.x) : (p.x - ax);
+                    w = Math.max(crop.min, Math.min(w, availW, b.w, b.h / R));
+                    const h = w * R;
+                    const nx = edge === 'w' ? ax - w : ax;
+                    const cy = s.y + s.h / 2;
+                    const ny = clampVal(cy - h / 2, b.y, b.y + b.h - h);
+                    crop.r = { x: nx, y: ny, w, h };
+                } else {
+                    const ay = edge === 'n' ? s.y + s.h : s.y;
+                    const availH = edge === 'n' ? (ay - b.y) : (b.y + b.h - ay);
+                    let h = edge === 'n' ? (ay - p.y) : (p.y - ay);
+                    h = Math.max(crop.min * R, Math.min(h, availH, b.h, b.w * R));
+                    const w = h / R;
+                    const ny = edge === 'n' ? ay - h : ay;
+                    const cx = s.x + s.w / 2;
+                    const nx = clampVal(cx - w / 2, b.x, b.x + b.w - w);
+                    crop.r = { x: nx, y: ny, w, h };
+                }
                 paintSel();
                 return;
             }
@@ -1436,6 +1493,10 @@ button:active { opacity: .78; }
          * 新插入的楼层图片还没解码，容器可能量不到尺寸，此时 clamp 会把
          * 已保存的位移错误归零 —— 这就是"位置自己回到原处"的真凶。
          */
+        /* 主题常用 `!important` 锁死头像尺寸（如 #chat .mes .avatar img{width:100%!important}），
+           这里统一用 important 写入，保证任何主题下位移与缩放都说了算 */
+        const setImp = (prop, value) => el.style.setProperty(prop, value, 'important');
+
         const applyTransform = (x, y, s, fromRestore) => {
             let box = readBox();
             if (!box) {
@@ -1445,11 +1506,11 @@ button:active { opacity: .78; }
                 if (mode !== 'background') {
                     const ox = Math.round(x);
                     const oy = Math.round(y);
-                    el.style.position = 'absolute';
-                    el.style.left = '50%';
-                    el.style.top = '50%';
-                    el.style.transformOrigin = 'center center';
-                    el.style.transform = `translate3d(calc(-50% + ${ox}px), calc(-50% + ${oy}px), 0px)`;
+                    setImp('position', 'absolute');
+                    setImp('left', '50%');
+                    setImp('top', '50%');
+                    setImp('transform-origin', 'center center');
+                    setImp('transform', `translate3d(calc(-50% + ${ox}px), calc(-50% + ${oy}px), 0px)`);
                 }
                 return;
             }
@@ -1467,8 +1528,8 @@ button:active { opacity: .78; }
             scale = s;
 
             if (mode === 'background') {
-                el.style.backgroundSize = `${s * 100}% auto`;
-                el.style.backgroundPosition = `calc(50% + ${px}px) calc(50% + ${py}px)`;
+                setImp('background-size', `${s * 100}% auto`);
+                setImp('background-position', `calc(50% + ${px}px) calc(50% + ${py}px)`);
                 return;
             }
 
@@ -1480,20 +1541,20 @@ button:active { opacity: .78; }
             const offX = Math.round(px);
             const offY = Math.round(py);
 
-            el.style.position = 'absolute';
-            el.style.left = '50%';
-            el.style.top = '50%';
-            el.style.width = `${drawW}px`;
-            el.style.height = `${drawH}px`;
-            el.style.minWidth = `${drawW}px`;
-            el.style.minHeight = `${drawH}px`;
-            el.style.maxWidth = 'none';
-            el.style.maxHeight = 'none';
-            el.style.objectFit = 'cover';
-            el.style.objectPosition = 'center center';
-            el.style.display = 'block';
-            el.style.transformOrigin = 'center center';
-            el.style.transform = `translate3d(calc(-50% + ${offX}px), calc(-50% + ${offY}px), 0px)`;
+            setImp('position', 'absolute');
+            setImp('left', '50%');
+            setImp('top', '50%');
+            setImp('width', `${drawW}px`);
+            setImp('height', `${drawH}px`);
+            setImp('min-width', `${drawW}px`);
+            setImp('min-height', `${drawH}px`);
+            setImp('max-width', 'none');
+            setImp('max-height', 'none');
+            setImp('object-fit', 'cover');
+            setImp('object-position', 'center center');
+            setImp('display', 'block');
+            setImp('transform-origin', 'center center');
+            setImp('transform', `translate3d(calc(-50% + ${offX}px), calc(-50% + ${offY}px), 0px)`);
         };
 
         el.__applyStoredTransform = () => {
@@ -2104,7 +2165,7 @@ button:active { opacity: .78; }
         bindStEvents();
         window.addEventListener('resize', scheduleSweep);
         window.addEventListener('load', scheduleSweep, { once: true });
-        console.log('%c[ST Avatar+] v1.7.4 裁剪+动态头像合并版（原生头像同步 / 位置不回弹）', 'color:#f2f2f3;font-weight:bold');
+        console.log('%c[ST Avatar+] v1.7.5 裁剪+动态头像合并版（原生头像同步 / 位置不回弹）', 'color:#f2f2f3;font-weight:bold');
     }
 
     if (document.readyState === 'loading') {
