@@ -1,6 +1,6 @@
 /* ============================================================
  * SillyTavern 扩展：头像裁剪 + 动态头像（合并版）
- * nico-st-avatar-plus v1.7.1
+ * nico-st-avatar-plus v1.7.2
  *
  * v1.4.0 双击进入拖动模式，默认锁定，杜绝误触
  * v1.5.0 原生头像同引擎 + 按最终像素重绘（放大不糊）+ 重渲染巡检
@@ -14,6 +14,9 @@
  *        ★ 新楼层插入瞬间先摆好位移，避免"先闪原位置再跳"
  *        ★ 面具唯一 ID 记住上次成功解析值，页面刚启动也不会错档
  *        ★ 弹窗按钮基础样式补齐，底部 4 个按钮不再回到系统默认方块
+ * v1.7.2 ★ 弹窗改为极简黑白（无彩色 accent，白色主按钮）
+ *        ★ 高度自适应：max-height 用 dvh + 内容区独立滚动，矮屏/手机不再溢出
+ *        ★ 底部改为"次要按钮一行 + 应用整行"，窄屏不挤不换行
  *
  * 存储键（不改名，兼容历史数据）：
  *   st_avatar_video_urls / st_avatar_positions / st_avatar_scales
@@ -556,144 +559,159 @@
 .overlay {
     position: absolute; inset: 0;
     display: flex; align-items: center; justify-content: center;
-    padding: 18px; pointer-events: auto;
-    background: rgba(8,9,12,.62);
-    -webkit-backdrop-filter: blur(14px) saturate(130%);
-    backdrop-filter: blur(14px) saturate(130%);
+    padding: 12px; pointer-events: auto;
+    background: rgba(0, 0, 0, .74);
+    -webkit-backdrop-filter: blur(16px);
+    backdrop-filter: blur(16px);
     animation: fade .16s ease-out;
 }
 @keyframes fade { from { opacity: 0 } to { opacity: 1 } }
 .card {
-    width: min(94vw, 430px); max-height: 90vh;
-    display: flex; flex-direction: column;
-    background: linear-gradient(180deg, rgba(38,39,46,.96) 0%, rgba(26,27,33,.98) 100%);
-    border: 1px solid rgba(255,255,255,.10);
+    width: min(100%, 420px);
+    max-height: min(88vh, calc(100dvh - 24px));
+    display: flex; flex-direction: column; overflow: hidden;
+    background: linear-gradient(180deg, #17171a 0%, #0d0d10 100%);
+    border: 1px solid rgba(255, 255, 255, .10);
     border-radius: 20px;
-    box-shadow: 0 24px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(0,0,0,.35) inset, 0 1px 0 rgba(255,255,255,.07) inset;
-    padding: 18px;
-    color: #eceef2;
+    box-shadow: 0 30px 70px rgba(0, 0, 0, .65), 0 1px 0 rgba(255, 255, 255, .06) inset;
+    padding: 16px 16px 14px;
+    color: #ededed;
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Segoe UI", system-ui, sans-serif;
     font-size: 14px;
-    overflow: hidden;
     animation: rise .2s cubic-bezier(.22,.9,.3,1);
 }
-@keyframes rise { from { opacity: 0; transform: translateY(10px) scale(.98) } to { opacity: 1; transform: none } }
-.head { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
-.badge {
-    font-size: 11px; line-height: 1; padding: 5px 8px; border-radius: 999px;
-    font-weight: 600; letter-spacing: .02em; white-space: nowrap;
+@keyframes rise { from { opacity: 0; transform: translateY(10px) scale(.985) } to { opacity: 1; transform: none } }
+.content {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    padding-right: 2px; margin-right: -2px;
+    scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.16) transparent;
 }
-.badge--c { background: rgba(74,144,226,.18); color: #7cb0f5; border: 1px solid rgba(74,144,226,.35); }
-.badge--u { background: rgba(236,124,178,.16); color: #f0a0c8; border: 1px solid rgba(236,124,178,.34); }
-.badge--n { background: rgba(255,255,255,.08); color: #c9ccd4; border: 1px solid rgba(255,255,255,.12); }
+.content::-webkit-scrollbar { width: 4px; }
+.content::-webkit-scrollbar-thumb { background: rgba(255,255,255,.16); border-radius: 4px; }
+.head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex: 0 0 auto; }
+.badge {
+    font-size: 11px; line-height: 1; padding: 5px 9px; border-radius: 999px;
+    font-weight: 600; letter-spacing: .04em; white-space: nowrap;
+    border: 1px solid transparent;
+}
+.badge--c { background: #f4f4f4; color: #101012; border-color: #f4f4f4; }
+.badge--u { background: rgba(255,255,255,.10); color: #e8e8ea; border-color: rgba(255,255,255,.24); }
+.badge--n { background: transparent; color: #8d8d92; border-color: rgba(255,255,255,.16); }
 .name {
-    flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: #b9bec9;
+    flex: 1; min-width: 0; font-size: 12.5px; font-weight: 500; color: #a6a6ab;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .iconbtn {
-    flex: 0 0 auto; width: 28px; height: 28px; border-radius: 50%; padding: 0;
-    border: none; background: rgba(255,255,255,.08); color: #b9bec9;
-    font-size: 16px; line-height: 1; cursor: pointer; display: flex;
+    flex: 0 0 auto; width: 26px; height: 26px; border-radius: 50%; padding: 0;
+    border: 1px solid rgba(255,255,255,.12); background: transparent; color: #9a9a9f;
+    font-size: 15px; line-height: 1; cursor: pointer; display: flex;
     align-items: center; justify-content: center; -webkit-tap-highlight-color: transparent;
-    transition: background .15s ease, color .15s ease;
+    transition: background .15s ease, color .15s ease, border-color .15s ease;
 }
-.iconbtn:hover { background: rgba(255,255,255,.16); color: #fff; }
+.iconbtn:hover { background: rgba(255,255,255,.08); color: #fff; border-color: rgba(255,255,255,.26); }
 .picker {
     width: 100%; display: flex; align-items: center; gap: 12px;
-    padding: 14px 14px; border-radius: 14px; cursor: pointer;
-    border: 1px dashed rgba(122,176,245,.45);
-    background: rgba(74,144,226,.08);
-    color: #dce7f6; text-align: left; font: inherit;
+    padding: 15px 14px; border-radius: 14px; cursor: pointer;
+    border: 1px dashed rgba(255,255,255,.26);
+    background: rgba(255,255,255,.045);
+    color: #f2f2f3; text-align: left; font: inherit;
     -webkit-tap-highlight-color: transparent;
     transition: background .15s ease, border-color .15s ease;
 }
-.picker:hover { background: rgba(74,144,226,.14); border-color: rgba(122,176,245,.7); }
-.picker:active { transform: scale(.99); }
-.picker svg { flex: 0 0 auto; width: 22px; height: 22px; stroke: #7cb0f5; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
-.picker-txt { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.picker-t { font-size: 14px; font-weight: 600; color: #e8eefa; }
-.picker-s { font-size: 11.5px; color: #8f97a6; }
-.or { display: flex; align-items: center; gap: 10px; margin: 16px 0 12px; }
+.picker:hover { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.42); }
+.picker:active { transform: scale(.995); }
+.picker svg { flex: 0 0 auto; width: 20px; height: 20px; stroke: #f2f2f3; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.picker-txt { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.picker-t { font-size: 14px; font-weight: 600; color: #f4f4f5; letter-spacing: .01em; }
+.picker-s { font-size: 11.5px; color: #86868b; line-height: 1.4; }
+.or { display: flex; align-items: center; gap: 10px; margin: 15px 0 11px; }
 .or::before, .or::after { content: ""; flex: 1; height: 1px; background: rgba(255,255,255,.09); }
-.or span { font-size: 11px; color: #767d8b; letter-spacing: .04em; }
+.or span { font-size: 11px; color: #6f6f74; letter-spacing: .06em; }
 .url {
     width: 100%; padding: 12px 13px; border-radius: 12px;
-    border: 1px solid rgba(255,255,255,.12); background: rgba(0,0,0,.28);
-    color: #fff; font: inherit; outline: none;
+    border: 1px solid rgba(255,255,255,.13); background: rgba(255,255,255,.045);
+    color: #f2f2f3; font: inherit; outline: none;
     transition: border-color .15s ease, background .15s ease;
 }
-.url::placeholder { color: #5f6673; }
-.url:focus { border-color: rgba(122,176,245,.6); background: rgba(0,0,0,.38); }
+.url::placeholder { color: #6a6a6f; }
+.url:focus { border-color: rgba(255,255,255,.42); background: rgba(255,255,255,.07); }
 .state {
-    margin-top: 12px; font-size: 11.5px; color: #7f8797;
+    margin-top: 12px; font-size: 11.5px; color: #86868b;
     display: flex; align-items: center; gap: 7px;
 }
-.dot { width: 6px; height: 6px; border-radius: 50%; background: #5b6270; flex: 0 0 auto; }
-.dot--on { background: #46c18b; box-shadow: 0 0 8px rgba(70,193,139,.6); }
-.hint { margin-top: 14px; font-size: 11.5px; line-height: 1.65; color: #767d8b; }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: #5a5a5f; flex: 0 0 auto; }
+.dot--on { background: #f2f2f3; box-shadow: 0 0 10px rgba(255,255,255,.45); }
+.hint { margin-top: 13px; font-size: 11.5px; line-height: 1.7; color: #75757a; }
 .chip {
     margin-top: 12px; display: none; align-items: center; gap: 9px;
     padding: 9px 11px; border-radius: 11px;
-    background: rgba(70,193,139,.10); border: 1px solid rgba(70,193,139,.28);
-    color: #8fe0b6; font-size: 12px;
+    background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.15);
+    color: #eaeaec; font-size: 12px;
 }
-.chip .ok { font-size: 13px; }
-.foot { display: flex; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
+.chip .ok { font-size: 12px; color: #fff; }
+.foot {
+    flex: 0 0 auto; display: flex; flex-direction: column; gap: 8px;
+    margin-top: 14px; padding-top: 13px;
+    border-top: 1px solid rgba(255,255,255,.07);
+}
+.footrow { display: flex; gap: 8px; }
 button {
     font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
-    border: none; border-radius: 12px; padding: 11px 16px; color: #fff;
+    border: 1px solid transparent; border-radius: 12px; padding: 11px 14px;
+    color: #ededee; background: transparent;
     -webkit-tap-highlight-color: transparent; white-space: nowrap;
+    transition: background .15s ease, opacity .15s ease, color .15s ease;
 }
-.btn {
-    flex: 1 1 auto; min-width: 74px; padding: 11px 0; border: none; border-radius: 12px;
-    font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
-    transition: filter .15s ease, background .15s ease;
+button:active { opacity: .78; }
+.primary {
+    width: 100%; background: #f7f7f8; color: #101012; border-color: #f7f7f8;
+    box-shadow: 0 8px 22px rgba(0, 0, 0, .45);
 }
-.btn:active { filter: brightness(.9); }
-.primary { flex: 1.5 1 auto; background: linear-gradient(180deg,#5b9df0,#3d84e0); color: #fff; box-shadow: 0 4px 14px rgba(61,132,224,.35); }
-.cancel  { background: rgba(255,255,255,.07); color: #b9bec9; }
-.ghost   { background: rgba(255,255,255,.07); color: #9aa1ae; font-weight: 500; }
-.subrow { display: flex; justify-content: center; margin-top: 12px; }
+.primary:hover { background: #fff; }
+.cancel { flex: 1 1 0; background: rgba(255,255,255,.06); border-color: rgba(255,255,255,.10); color: #b6b6ba; padding: 10px 8px; }
+.cancel:hover { background: rgba(255,255,255,.10); }
+.ghost  { flex: 1 1 0; background: transparent; border-color: rgba(255,255,255,.14); color: #9c9ca1; font-weight: 500; padding: 10px 8px; }
+.ghost:hover { background: rgba(255,255,255,.06); color: #e6e6e8; }
+.subrow { display: flex; justify-content: center; margin-top: 10px; }
 .linkbtn {
-    border: none; background: none; color: #6f7684; font: inherit; font-size: 11.5px;
+    border: none; background: none; color: #75757a; font: inherit; font-size: 11.5px;
     cursor: pointer; padding: 4px; text-decoration: underline; text-underline-offset: 3px;
     -webkit-tap-highlight-color: transparent;
 }
-.linkbtn:hover { color: #98a0ae; }
+.linkbtn:hover { color: #a8a8ad; }
 /* 裁剪页 */
 .cropcard { padding: 16px; }
 .cropwrap {
     position: relative; width: 100%; border-radius: 14px; overflow: hidden;
-    background: #0b0c0f; border: 1px solid rgba(255,255,255,.08);
+    background: #0a0a0b; border: 1px solid rgba(255,255,255,.08);
 }
-.stage { position: relative; width: 100%; height: min(52vh, 420px); touch-action: none; }
+.stage { position: relative; width: 100%; height: min(44vh, 380px); touch-action: none; }
 .stage img {
     position: absolute; user-select: none; -webkit-user-drag: none; pointer-events: none;
     image-rendering: auto;
 }
 .sel {
-    position: absolute; border: 1px solid rgba(255,255,255,.9);
-    box-shadow: 0 0 0 9999px rgba(0,0,0,.62);
+    position: absolute; border: 1px solid rgba(255,255,255,.92);
+    box-shadow: 0 0 0 9999px rgba(0,0,0,.66);
     cursor: move;
 }
 .sel::after {
     content: ""; position: absolute; inset: 0;
-    border: 1px solid rgba(74,144,226,.0);
     background:
-        linear-gradient(to right, rgba(255,255,255,.34) 1px, transparent 1px) 0 0 / 33.333% 100%,
-        linear-gradient(to bottom, rgba(255,255,255,.34) 1px, transparent 1px) 0 0 / 100% 33.333%;
-    opacity: .85; pointer-events: none;
+        linear-gradient(to right, rgba(255,255,255,.30) 1px, transparent 1px) 0 0 / 33.333% 100%,
+        linear-gradient(to bottom, rgba(255,255,255,.30) 1px, transparent 1px) 0 0 / 100% 33.333%;
+    opacity: .9; pointer-events: none;
 }
 .handle {
-    position: absolute; width: 18px; height: 18px; border-radius: 5px;
-    background: #fff; border: 1.5px solid rgba(0,0,0,.35);
-    box-shadow: 0 2px 8px rgba(0,0,0,.45);
+    position: absolute; width: 16px; height: 16px; border-radius: 4px;
+    background: #fff; border: 1px solid rgba(0,0,0,.45);
+    box-shadow: 0 2px 8px rgba(0,0,0,.5);
 }
-.handle[data-h="nw"] { left: -9px; top: -9px; cursor: nwse-resize; }
-.handle[data-h="ne"] { right: -9px; top: -9px; cursor: nesw-resize; }
-.handle[data-h="sw"] { left: -9px; bottom: -9px; cursor: nesw-resize; }
-.handle[data-h="se"] { right: -9px; bottom: -9px; cursor: nwse-resize; }
+.handle[data-h="nw"] { left: -8px; top: -8px; cursor: nwse-resize; }
+.handle[data-h="ne"] { right: -8px; top: -8px; cursor: nesw-resize; }
+.handle[data-h="sw"] { left: -8px; bottom: -8px; cursor: nesw-resize; }
+.handle[data-h="se"] { right: -8px; bottom: -8px; cursor: nwse-resize; }
 </style>
 <div class="overlay">
   <div class="card" id="pickPage">
@@ -703,31 +721,35 @@ button {
       <button class="iconbtn" id="closePick" title="关闭">&times;</button>
     </div>
 
-    <button class="picker" id="fileBtn" type="button">
-      <svg viewBox="0 0 24 24"><path d="M12 15V3m0 0L8 7m4-4l4 4"/><path d="M3 15v3a2 2 0 002 2h14a2 2 0 002-2v-3"/></svg>
-      <span class="picker-txt">
-        <span class="picker-t">选择本机文件</span>
-        <span class="picker-s">图片会自动裁成 2:3 写入原生头像；视频作为动态头像</span>
-      </span>
-    </button>
-    <input id="fileInput" type="file" accept="image/*,video/*" style="display:none">
+    <div class="content">
+      <button class="picker" id="fileBtn" type="button">
+        <svg viewBox="0 0 24 24"><path d="M12 15V3m0 0L8 7m4-4l4 4"/><path d="M3 15v3a2 2 0 002 2h14a2 2 0 002-2v-3"/></svg>
+        <span class="picker-txt">
+          <span class="picker-t">选择本机图片或视频</span>
+          <span class="picker-s">图片自动裁成 2:3 写入原生头像 · 视频作为动态头像</span>
+        </span>
+      </button>
+      <input id="fileInput" type="file" accept="image/*,video/*" style="display:none">
 
-    <div class="or"><span>或粘贴链接</span></div>
-    <input class="url" id="urlInput" type="url" inputmode="url" autocapitalize="off"
-           autocorrect="off" spellcheck="false" placeholder="https://… 图片或视频直链">
+      <div class="or"><span>或粘贴链接</span></div>
+      <input class="url" id="urlInput" type="url" inputmode="url" autocapitalize="off"
+             autocorrect="off" spellcheck="false" placeholder="https://… 图片或视频直链">
 
-    <div class="state"><span class="dot" id="stateDot"></span><span id="stateText">酒馆原生头像</span></div>
-    <div class="chip" id="chip"><span class="ok">✓</span><span id="chipText"></span></div>
+      <div class="state"><span class="dot" id="stateDot"></span><span id="stateText">酒馆原生头像</span></div>
+      <div class="chip" id="chip"><span class="ok">✓</span><span id="chipText"></span></div>
 
-    <div class="hint">
-      图片写入原生头像后，侧栏、角色列表、手机端与聊天头像同步，不再出现两套图；<br>
-      位置与缩放按「存档 + 角色/面具」独立保存，新楼层一出现就是调节后的位置。
+      <div class="hint">
+        图片写入原生头像后，侧栏、角色列表、手机端与聊天头像同步，不再有两套图；<br>
+        位置与缩放按「存档 + 角色/面具」独立保存，新楼层一出现就是调节后的位置。
+      </div>
     </div>
 
     <div class="foot">
-      <button class="ghost" id="nativeBtn" type="button">恢复原生</button>
-      <button class="ghost" id="resetBtn" type="button">重置位置</button>
-      <button class="cancel" id="cancelBtn" type="button">取消</button>
+      <div class="footrow">
+        <button class="ghost" id="nativeBtn" type="button">恢复原生</button>
+        <button class="ghost" id="resetBtn" type="button">重置位置</button>
+        <button class="cancel" id="cancelBtn" type="button">取消</button>
+      </div>
       <button class="primary" id="okBtn" type="button">应用</button>
     </div>
   </div>
@@ -738,20 +760,24 @@ button {
       <span class="name">2:3 头像 · 拖动框选保留区域</span>
       <button class="iconbtn" id="closeCrop" title="关闭">&times;</button>
     </div>
-    <div class="cropwrap">
-      <div class="stage" id="stage">
-        <img id="cropImg" alt="" draggable="false">
-        <div class="sel" id="sel">
-          <div class="handle" data-h="nw"></div>
-          <div class="handle" data-h="ne"></div>
-          <div class="handle" data-h="sw"></div>
-          <div class="handle" data-h="se"></div>
+    <div class="content">
+      <div class="cropwrap">
+        <div class="stage" id="stage">
+          <img id="cropImg" alt="" draggable="false">
+          <div class="sel" id="sel">
+            <div class="handle" data-h="nw"></div>
+            <div class="handle" data-h="ne"></div>
+            <div class="handle" data-h="sw"></div>
+            <div class="handle" data-h="se"></div>
+          </div>
         </div>
       </div>
     </div>
     <div class="foot">
-      <button class="ghost" id="backBtn" type="button">返回</button>
-      <button class="ghost" id="cropReset" type="button">重置选区</button>
+      <div class="footrow">
+        <button class="ghost" id="backBtn" type="button">返回</button>
+        <button class="ghost" id="cropReset" type="button">重置选区</button>
+      </div>
       <button class="primary" id="cropOk" type="button">确认裁剪</button>
     </div>
   </div>
@@ -1489,7 +1515,7 @@ button {
             if (v) {
                 if (unlockedEl && unlockedEl !== el) unlockedEl.__lockAvatar?.();
                 unlockedEl = el;
-                el.style.outline = '2px solid rgba(74,144,226,.9)';
+                el.style.outline = '2px solid rgba(255,255,255,.92)';
                 el.style.outlineOffset = '-2px';
                 el.style.cursor = 'grab';
                 if (mode !== 'background') el.style.touchAction = 'none';
@@ -1968,7 +1994,7 @@ button {
         bindStEvents();
         window.addEventListener('resize', scheduleSweep);
         window.addEventListener('load', scheduleSweep, { once: true });
-        console.log('%c[ST Avatar+] v1.7.1 裁剪+动态头像合并版（原生头像同步 / 位置不回弹）', 'color:#4a90e2;font-weight:bold');
+        console.log('%c[ST Avatar+] v1.7.2 裁剪+动态头像合并版（原生头像同步 / 位置不回弹）', 'color:#f2f2f3;font-weight:bold');
     }
 
     if (document.readyState === 'loading') {
